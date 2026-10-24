@@ -273,7 +273,7 @@ This project is released under the [MIT License](LICENSE).
 @inproceedings{gbrag2027,
   title     = {GBRAG: Granular-Ball Hierarchical Retrieval-Augmented Generation},
   author    = {Anonymous},
-  booktitle = {Proceedings of AAAI},
+  booktitle = {Proceedings of The Web Conference (WWW)},
   year      = {2027}
 }
 ```
