@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Models (download separately, see README)
+all-MiniLM-L6-v2/
+chentong00/
+models/
+
+# Generated experiment artifacts
+outputs*/
+*.log
+*.jsonl
+*.npy
+!*.example.jsonl
+
+# Dataset intermediate caches (regenerated automatically by the pipeline)
+dataset/**/first_step_output/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.env
