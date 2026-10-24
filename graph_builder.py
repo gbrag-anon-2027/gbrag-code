@@ -1,3 +1,4 @@
+
 import math
 
 import numpy as np
@@ -5,7 +6,6 @@ from langchain_core.prompts import PromptTemplate
 import ast
 import re
 import hashlib, os, json
-import time
 
 
 GRAPH_BUILD_CACHE_VERSION = "v2"
@@ -202,7 +202,7 @@ def make_sureN(entity_dict):
 
     return N_80_count, idx
 
-def Sphere_Clustering(entity_dict, embeddings, N, entity_idx, Propositions):
+def build_e_balls(entity_dict, embeddings, N, entity_idx, Propositions):
     """
     Core granular-ball clustering function (modified).
     Key change: the radius is computed from the original high-dimensional
@@ -210,14 +210,14 @@ def Sphere_Clustering(entity_dict, embeddings, N, entity_idx, Propositions):
     high_dim_embeddings: original high-dimensional embedding vectors (not reduced).
     """
 
-    C_ball = []
+    E_ball = []
 
     count = 0
     prop_idx_map = {item['idx']: i for i, item in enumerate(Propositions)}  # proposition idx -> embedding index
 
     for i, (entity_name, item) in enumerate(entity_dict.items()):
         if i == 0 or (i + 1) % 500 == 0:
-            print(f"[4/9] entity cluster {i + 1}/{len(entity_dict)}", flush=True)
+            print(f"[4/8] entity cluster {i + 1}/{len(entity_dict)}", flush=True)
         if item["count"] >= N:  # only process entity clusters occurring >= N times
             current_indices = item["idx"]  # proposition idx list of this entity cluster
 
@@ -234,9 +234,9 @@ def Sphere_Clustering(entity_dict, embeddings, N, entity_idx, Propositions):
                 "tags": tags
             }
             count += 1
-            C_ball.append(ball)
+            E_ball.append(ball)
 
-    return C_ball
+    return E_ball
 
 def idx_str_2_idx_int(a_idx_str):
     a_idx_int = []
@@ -254,17 +254,17 @@ def get_idx_entity(idx_int, Propositions):
 
     return entity_list
 
-def C_split_to_B(C_balls, Propositions, embeddings, model):
+def split_e_into_d_balls(E_balls, Propositions, embeddings, model):
 
-    B_balls = []
+    D_balls = []
 
     count = -1
-    for idx, ball in enumerate(C_balls):
+    for idx, ball in enumerate(E_balls):
         if idx == 0 or (idx + 1) % 100 == 0:
-            print(f"[6/9] C ball {idx + 1}/{len(C_balls)}", flush=True)
+            print(f"[6/8] E ball {idx + 1}/{len(E_balls)}", flush=True)
         A_idx_list_used = set()
         # entity_list = ball["entity_list"]
-        C_2_B_list = []
+        E_2_D_list = []
 
         current_all_indices = ball["all_indices"]
 
@@ -323,10 +323,10 @@ def C_split_to_B(C_balls, Propositions, embeddings, model):
                 "tags": comment_tags,
                 "time_indices": time_indices_in_ball,
             }
-            C_2_B_list.append(f"B_{count}")
-            B_balls.append(new_ball)
-        C_balls[idx].update({'b_indices': C_2_B_list})
-    return B_balls, C_balls
+            E_2_D_list.append(f"B_{count}")
+            D_balls.append(new_ball)
+        E_balls[idx].update({'d_indices': E_2_D_list})
+    return D_balls, E_balls
 
 def cosine_distance(a, b):
     return 1 - (np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
@@ -387,7 +387,7 @@ def cluster_one_node_new(none_clustering_list, fen, Propositions, threshold=0.6)
 
     return list, one_nodes
 
-def patch_unclustered_nodes_new(C_balls, None_Clustering, embeddings, Propositions):
+def patch_unclustered_nodes_new(E_balls, None_Clustering, embeddings, Propositions):
     balls_list = []
 
     for idx_int in None_Clustering:
@@ -399,7 +399,7 @@ def patch_unclustered_nodes_new(C_balls, None_Clustering, embeddings, Propositio
         }
         balls_list.append(current_ball)
 
-    one_ball_list, one_nodes = cluster_one_node_new(balls_list, len(C_balls), Propositions)
+    one_ball_list, one_nodes = cluster_one_node_new(balls_list, len(E_balls), Propositions)
 
     return one_ball_list, one_nodes
 
@@ -415,7 +415,7 @@ def func_res(res: str):
 
     return entity_list, extend_key_list
 
-def second_Sphere_Clustering(one_B_balls_cluster, entity_dict, exting_Balls, embeddings, model, llm):
+def build_e_balls_second_pass(one_B_balls_cluster, entity_dict, exting_Balls, embeddings, model, llm):
     prompt_str = """
     You are a professional expert in knowledge graph entity alignment. Your task is to generate a list of 1 to 3 representative entities along with 1 to 3 domain labels for a group of semantically similar propositions.
 
@@ -495,7 +495,7 @@ def second_Sphere_Clustering(one_B_balls_cluster, entity_dict, exting_Balls, emb
                 merged = True
                 break  # merged into one ball; stop searching
 
-        # Merged into no existing ball: becomes a formal new C ball.
+        # Merged into no existing ball: becomes a formal new E ball.
         if not merged:
             last_idx += 1
             center_idx, radius = get_cluster_center_and_radius(new_ball['all_indices'], embeddings)
@@ -513,17 +513,17 @@ def second_Sphere_Clustering(one_B_balls_cluster, entity_dict, exting_Balls, emb
 
     return final_new_balls
 
-def unclustered_nodes_func(entity_dict, C_balls, embeddings, fen, model, llm, Propositions):
+def unclustered_nodes_func(entity_dict, E_balls, embeddings, fen, model, llm, Propositions):
 
     clustered_indices = set()
     one_node_embeddings = []
     center_radius_list = []
     center_embeddings = []
-    # track the C-ball indices that changed
+    # track the E-ball indices that changed
     C_idx = set()
 
     # First collect the ids of unclustered propositions.
-    for item in C_balls:
+    for item in E_balls:
         for str_idx in item['all_indices']:
             int_idx = int(str_idx.split('_')[-1])
             clustered_indices.add(int_idx)
@@ -534,8 +534,8 @@ def unclustered_nodes_func(entity_dict, C_balls, embeddings, fen, model, llm, Pr
         one_node_embeddings.append(embeddings[idx])
     one_node_embeddings = np.array(one_node_embeddings)
 
-    # fetch the radius (angle) list and center-vector list of every C ball
-    for item in C_balls:
+    # fetch the radius (angle) list and center-vector list of every E ball
+    for item in E_balls:
         center_idx = int(item["center_idx"].split("_")[-1])
         radius = item["radius"]
         center_embedding = embeddings[center_idx]
@@ -543,7 +543,7 @@ def unclustered_nodes_func(entity_dict, C_balls, embeddings, fen, model, llm, Pr
         center_embeddings.append(center_embedding)
     center_embeddings = np.array(center_embeddings)
 
-    # compute the angles between unclustered proposition nodes and all C-ball
+    # compute the angles between unclustered proposition nodes and all E-ball
     # centers; find the ball whose radius covers the node (smallest angle among
     # those within radius).
     one_node_embs_length = np.linalg.norm(one_node_embeddings, axis=1, keepdims=True)
@@ -564,7 +564,7 @@ def unclustered_nodes_func(entity_dict, C_balls, embeddings, fen, model, llm, Pr
 
     for i in range(one_node_num):
         if i == 0 or (i + 1) % 5000 == 0:
-            print(f"[5/9] unclustered proposition {i + 1}/{one_node_num}", flush=True)
+            print(f"[5/8] unclustered proposition {i + 1}/{one_node_num}", flush=True)
         node_cos = radius_cos[i].tolist()
         ball_indices = list(range(len(node_cos)))
 
@@ -575,8 +575,8 @@ def unclustered_nodes_func(entity_dict, C_balls, embeddings, fen, model, llm, Pr
             min_cos_idx = node_cos.index(min_cos_val)
             C_balls_idx = ball_indices[min_cos_idx]
 
-            if C_balls[C_balls_idx]["radius"] > min_cos_val:
-                C_balls[C_balls_idx]["all_indices"].append(f"A_{one_node_list[i]}")
+            if E_balls[C_balls_idx]["radius"] > min_cos_val:
+                E_balls[C_balls_idx]["all_indices"].append(f"A_{one_node_list[i]}")
                 matched = True
                 C_idx.add(C_balls_idx)
 
@@ -593,7 +593,7 @@ def unclustered_nodes_func(entity_dict, C_balls, embeddings, fen, model, llm, Pr
         node_embedding = embeddings[unclustered_idx]
         node_tags = set(Propositions[unclustered_idx]["extend_key_list"])
 
-        # compute the distance from this isolated node to every C-ball center and
+        # compute the distance from this isolated node to every E-ball center and
         # find the nearest ball (even when the distance already exceeds its radius).
         # Then compare the node's extend_key_list with that ball's tags: if they
         # intersect (or semantic_set_similarity is high), absorb the node.
@@ -603,7 +603,7 @@ def unclustered_nodes_func(entity_dict, C_balls, embeddings, fen, model, llm, Pr
             distances.append(1 - cos)
 
         close_c_ball_idx = np.argmin(distances)
-        close_c_ball = C_balls[close_c_ball_idx]
+        close_c_ball = E_balls[close_c_ball_idx]
         # print(close_c_ball["tags"])  # e.g. ['Radio Broadcasting', 'Media Industry', 'Music Industry', 'Corporate Leadership']
 
         ball_tags = set()
@@ -614,9 +614,9 @@ def unclustered_nodes_func(entity_dict, C_balls, embeddings, fen, model, llm, Pr
                 ball_tags.add(tag)
 
         if node_tags & ball_tags or semantic_set_similarity(node_tags, ball_tags, model) > 0.65:
-            C_balls[close_c_ball_idx]["all_indices"].append(f"A_{unclustered_idx}")
+            E_balls[close_c_ball_idx]["all_indices"].append(f"A_{unclustered_idx}")
             new_tags_set = set(close_c_ball["tags"]) | node_tags
-            C_balls[close_c_ball_idx]["tags"] = list(new_tags_set)
+            E_balls[close_c_ball_idx]["tags"] = list(new_tags_set)
 
             C_idx.add(close_c_ball_idx)
 
@@ -625,95 +625,27 @@ def unclustered_nodes_func(entity_dict, C_balls, embeddings, fen, model, llm, Pr
 
     new_one_onde_list = final_unclustered_list
 
-    # refresh the modified C-ball info
+    # refresh the modified E-ball info
     for j in C_idx:
-        current_indices = C_balls[j]["all_indices"]
+        current_indices = E_balls[j]["all_indices"]
         center_idx, radius = get_cluster_center_and_radius(current_indices, embeddings)
-        C_balls[j]["center_idx"] = center_idx
-        C_balls[j]["radius"] = radius
+        E_balls[j]["center_idx"] = center_idx
+        E_balls[j]["radius"] = radius
 
-    C_second_balls, one_node_new = patch_unclustered_nodes_new(C_balls, new_one_onde_list, embeddings, Propositions)
+    C_second_balls, one_node_new = patch_unclustered_nodes_new(E_balls, new_one_onde_list, embeddings, Propositions)
 
     # re-extract entities and re-assign domains for the remaining unclustered nodes
-    C_balls_second = second_Sphere_Clustering(C_second_balls, entity_dict, C_balls, embeddings, model, llm)
+    C_balls_second = build_e_balls_second_pass(C_second_balls, entity_dict, E_balls, embeddings, model, llm)
 
-    C_balls = C_balls + C_balls_second
+    E_balls = E_balls + C_balls_second
 
-    return C_balls, one_node_new
+    return E_balls, one_node_new
 
 
-def cluster_D_balls(C_balls, model, embeddings, llm, sim_threshold=0.6,):
-    count = -1
-    used_C_balls_idx = []  # C-ball indices already clustered
-    D_Balls = []
-    C_balls_all_idx = [ball['idx'] for ball in C_balls]
 
-    for i, ball in enumerate(C_balls):
-
-        if C_balls[i]["idx"] in used_C_balls_idx:
-            continue
-
-        _idx_i = C_balls[i]["idx"]
-        tags1 = C_balls[i]["tags"]
-        entity1 = C_balls[i]["entity_list"]
-
-        c_indices_in_d = [_idx_i]
-        used_C_balls_idx.append(_idx_i)
-
-        merged_tags = tags1.copy()
-        merged_entities = entity1.copy()
-
-        for j in range(i + 1, len(C_balls)):
-            if C_balls[j]["idx"] in used_C_balls_idx:
-                continue
-            _idx_j = C_balls[j]["idx"]
-            tags2 = C_balls[j]["tags"]
-            entity2 = C_balls[j]["entity_list"]
-
-            tag_score = semantic_set_similarity(tags1, tags2, model)
-
-            entity_score = semantic_set_similarity(entity1, entity2, model)
-
-            overlap = bool(set(entity1) & set(entity2))
-
-            # combined criterion:
-            # tags very similar (same domain) AND entity semantics also similar,
-            # OR direct entity-name overlap.
-            if (tag_score > sim_threshold and entity_score > 0.7) or overlap:
-                c_indices_in_d.append(_idx_j)
-                used_C_balls_idx.append(_idx_j)
-
-                merged_tags = list(set(merged_tags + tags2))
-                merged_entities = list(set(merged_entities + entity2))
-
-        A_all_indices = []
-        if len(c_indices_in_d) > 0:
-            for c_idx_str in c_indices_in_d:
-                c_ball_obj = next((b for b in C_balls if b['idx'] == c_idx_str), None)
-                if c_ball_obj:
-                    A_all_indices.extend(c_ball_obj['all_indices'])
-
-        A_all_indices = list(set(A_all_indices))
-        summary = map_reduce_summary(c_indices_in_d, C_balls, llm, 200, "D")
-        center_idx, radius = get_cluster_center_and_radius(A_all_indices, embeddings)
-        count += 1
-        Ball = {
-            'idx': f"D_{count}",
-            'center_idx': center_idx,
-            'a_indices': A_all_indices,
-            'c_indices': c_indices_in_d,
-            'radius': radius,
-            'entity_list': merged_entities,
-            'tags': merged_tags,
-            'summary': summary
-        }
-        D_Balls.append(Ball)
-
-    return D_Balls
-
-def link_c_balls_by_shared_entities(global_candidates, C_entity_map, Propositions):
+def link_e_balls_by_shared_entities(global_candidates, C_entity_map, Propositions):
     """
-    :param global_candidates: boundary nodes of all C balls, each with its entity list
+    :param global_candidates: boundary nodes of all E balls, each with its entity list
     :param Propositions: original proposition list
     :return: edge list info
     """
@@ -725,12 +657,12 @@ def link_c_balls_by_shared_entities(global_candidates, C_entity_map, Proposition
             entity_to_c_balls.setdefault(entity, set()).add(c_idx)
 
     # track the proposition node ids each ball has already contributed
-    contribute_C_ball = {}
+    contribute_E_ball = {}
 
     for item in global_candidates:
         c1 = item["C_ball_idx"]
         # ---- disabled Plan A: one boundary node per ball ----
-        # if c1 in contribute_C_ball:
+        # if c1 in contribute_E_ball:
         #     continue
         # ----------------------------------------------------
         max_idx_int = int(item["max_idx"].split("_")[-1])
@@ -750,8 +682,8 @@ def link_c_balls_by_shared_entities(global_candidates, C_entity_map, Proposition
                 continue
             if entity_set & value:
                 edge = {
-                    "node_C_1": c1,
-                    "node_C_2": c2,
+                    "node_E_1": c1,
+                    "node_E_2": c2,
                     "relation": Propositions[max_idx_int]["proposition"],
                     "shared_entities": list(entity_set & value),
                     "prop_idx": max_idx_str,
@@ -763,18 +695,18 @@ def link_c_balls_by_shared_entities(global_candidates, C_entity_map, Proposition
 
     # ---------------------- Plan A ----------------------
     #     if is_edge_formed:
-    #         contribute_C_ball[c1] = max_idx_str
+    #         contribute_E_ball[c1] = max_idx_str
         # ---------------------- Plan B ----------------------
         if is_edge_formed:
             # append the contributed node to the list
-            if c1 not in contribute_C_ball:
-                contribute_C_ball[c1] = []
-            if max_idx_str not in contribute_C_ball[c1]:
-                contribute_C_ball[c1].append(max_idx_str)
+            if c1 not in contribute_E_ball:
+                contribute_E_ball[c1] = []
+            if max_idx_str not in contribute_E_ball[c1]:
+                contribute_E_ball[c1].append(max_idx_str)
 
 
 
-    return edges, edges_key, contribute_C_ball
+    return edges, edges_key, contribute_E_ball
 
 def cal_cos(emb1, emb2):
     emb1 = np.array(emb1)
@@ -789,27 +721,27 @@ def cal_cos(emb1, emb2):
     cos = np.dot(emb1, emb2) / (norm1 * norm2)
     return cos
 
-def make_boundary_edges(C_balls, B_balls, Propositions, embeddings):
+def make_boundary_edges(E_balls, D_balls, Propositions, embeddings):
     """
-    Global outliers: rank all C-ball nodes together and build edges starting
+    Global outliers: rank all E-ball nodes together and build edges starting
     from the most peripheral ones.
-    :param max_edges_per_ball: how many propositions a C ball may contribute as
+    :param max_edges_per_ball: how many propositions a E ball may contribute as
                                edges (default 1, to avoid draining a ball)
     """
-    # 1. map each C ball to its entity list
+    # 1. map each E ball to its entity list
     C_entity_map = {
-        ball["idx"]: set(str(e).lower().strip() for e in ball["entity_list"]) for ball in C_balls
+        ball["idx"]: set(str(e).lower().strip() for e in ball["entity_list"]) for ball in E_balls
     }
     entity_to_c_balls = {}
     for c_idx, entities in C_entity_map.items():
         for entity in entities:
             entity_to_c_balls.setdefault(entity, set()).add(c_idx)
 
-    # 2. find, per C ball, the propositions farthest from the center vector
-    # (with their entity lists); collect all non-center nodes of all C balls
+    # 2. find, per E ball, the propositions farthest from the center vector
+    # (with their entity lists); collect all non-center nodes of all E balls
     # into the global candidate pool
     global_candidates = []
-    for ball in C_balls:
+    for ball in E_balls:
         center_idx_str = ball["center_idx"]
         center_emb = embeddings[int(center_idx_str.split("_")[-1])]
 
@@ -825,7 +757,7 @@ def make_boundary_edges(C_balls, B_balls, Propositions, embeddings):
             entity_list = Propositions[idx_int]["entity_list"]
             entity_set = set(e.lower().strip() for e in entity_list)
 
-            # [Change 1]: count how many *other* C balls each entity of this node
+            # [Change 1]: count how many *other* E balls each entity of this node
             # can intersect with.
             cross_ball_ids = set()
             for entity in entity_set:
@@ -854,44 +786,44 @@ def make_boundary_edges(C_balls, B_balls, Propositions, embeddings):
 
     # 4. check for shared entities with other balls; build an (undirected) edge
     # and record the already-linked undirected pairs.
-    edges, edges_key, contribute_C_ball = link_c_balls_by_shared_entities(global_candidates, C_entity_map, Propositions)
+    edges, edges_key, contribute_E_ball = link_e_balls_by_shared_entities(global_candidates, C_entity_map, Propositions)
     # Keep nohup logs manageable when the graph contains many edges.
     print(f"edges count: {len(edges)}")
     print(f"edge samples: {edges[:5]}")
 
-    # 5. update C_balls and B_balls
-    C_balls, B_balls = update_balls_after_edge_extraction(C_balls, B_balls, contribute_C_ball, embeddings, Propositions)
+    # 5. update E_balls and D_balls
+    E_balls, D_balls = update_balls_after_edge_extraction(E_balls, D_balls, contribute_E_ball, embeddings, Propositions)
 
-    return C_balls, B_balls, edges, edges_key
+    return E_balls, D_balls, edges, edges_key
 
-def update_balls_after_edge_extraction(C_balls, B_balls, contribute_C_ball, embeddings, Propositions):
+def update_balls_after_edge_extraction(E_balls, D_balls, contribute_E_ball, embeddings, Propositions):
     """
     Remove the proposition nodes extracted as edges from the original C and B
     balls and refresh their attributes.
-    :return: updated C_balls, B_balls
+    :return: updated E_balls, D_balls
     """
 
-    b_balls_dict = {b['idx']: b for b in B_balls}
+    d_balls_dict = {d['idx']: d for d in D_balls}
 
-    for ball in C_balls:
+    for ball in E_balls:
         c_idx = ball['idx']
 
-        # If this C ball contributed boundary nodes (was modified).
-        if c_idx in contribute_C_ball:
-            # removed_node_str = contribute_C_ball[c_idx]  # Plan A
-            removed_nodes_list = contribute_C_ball[c_idx]  # Plan B
+        # If this E ball contributed boundary nodes (was modified).
+        if c_idx in contribute_E_ball:
+            # removed_node_str = contribute_E_ball[c_idx]  # Plan A
+            removed_nodes_list = contribute_E_ball[c_idx]  # Plan B
 
             # --------------- Plan A1 (aligned with Plan A of
-            # link_c_balls_by_shared_entities): remove the node from the C ball.
+            # link_e_balls_by_shared_entities): remove the node from the E ball.
             # if removed_node_str in ball['all_indices']:
             #     ball['all_indices'].remove(removed_node_str)
 
-            # Plan B (aligned with Plan B of link_c_balls_by_shared_entities)
+            # Plan B (aligned with Plan B of link_e_balls_by_shared_entities)
             for removed_node_str in removed_nodes_list:
                 if removed_node_str in ball['all_indices']:
                     ball['all_indices'].remove(removed_node_str)
 
-            # 2. refresh the C ball's center, radius, entities, and tags
+            # 2. refresh the E ball's center, radius, entities, and tags
             if len(ball['all_indices']) > 0:
 
                 new_center, new_radius = get_cluster_center_and_radius(ball['all_indices'], embeddings)
@@ -907,50 +839,50 @@ def update_balls_after_edge_extraction(C_balls, B_balls, contribute_C_ball, embe
                 ball['entity_list'] = []
                 ball['tags'] = []
 
-            # 3. remove the node from B balls and drop emptied B balls
-            if 'b_indices' in ball:
+            # 3. remove the node from D balls and drop emptied D balls
+            if 'd_indices' in ball:
                 empty_b_balls = []
-                for b_idx_str in ball['b_indices']:
-                    if b_idx_str in b_balls_dict:
-                        b_ball = b_balls_dict[b_idx_str]
-                        # delete the node from this B ball
+                for d_idx_str in ball['d_indices']:
+                    if d_idx_str in d_balls_dict:
+                        d_ball = d_balls_dict[d_idx_str]
+                        # delete the node from this D ball
 
                         #---------------- Plan A ----------------
-                        # if removed_node_str in b_ball['all_indices']:
-                        #     b_ball['all_indices'].remove(removed_node_str)
+                        # if removed_node_str in d_ball['all_indices']:
+                        #     d_ball['all_indices'].remove(removed_node_str)
                         #
-                        #     # if the B ball becomes empty, mark it for deletion
-                        #     if len(b_ball['all_indices']) == 0:
-                        #         empty_b_balls.append(b_idx_str)
+                        #     # if the D ball becomes empty, mark it for deletion
+                        #     if len(d_ball['all_indices']) == 0:
+                        #         empty_b_balls.append(d_idx_str)
 
                         #---------------- Plan B ----------------
                         for removed_node_str in removed_nodes_list:
-                            if removed_node_str in b_ball['all_indices']:
-                                b_ball['all_indices'].remove(removed_node_str)
+                            if removed_node_str in d_ball['all_indices']:
+                                d_ball['all_indices'].remove(removed_node_str)
 
-                            # if the B ball becomes empty, mark it for deletion
-                        if len(b_ball['all_indices']) == 0:
-                            if b_idx_str not in empty_b_balls:
-                                empty_b_balls.append(b_idx_str)
+                            # if the D ball becomes empty, mark it for deletion
+                        if len(d_ball['all_indices']) == 0:
+                            if d_idx_str not in empty_b_balls:
+                                empty_b_balls.append(d_idx_str)
 
-                # remove emptied B balls from the C ball's member list and the global dict
+                # remove emptied D balls from the E ball's member list and the global dict
                 for empty_b in empty_b_balls:
-                    ball['b_indices'].remove(empty_b)
-                    del b_balls_dict[empty_b]
+                    ball['d_indices'].remove(empty_b)
+                    del d_balls_dict[empty_b]
 
-                    # convert the refreshed, complete B_balls dict back to a list
-    updated_B_balls = list(b_balls_dict.values())
+                    # convert the refreshed, complete D_balls dict back to a list
+    updated_B_balls = list(d_balls_dict.values())
 
-    return C_balls, updated_B_balls
+    return E_balls, updated_B_balls
 
-def C_map_reduce_summary(C_balls, llm, Propositions):
+def summarize_e_balls(E_balls, llm, Propositions):
 
-    for ball in C_balls:
+    for ball in E_balls:
         all_indices = ball["all_indices"]
-        summary = map_reduce_summary(all_indices, Propositions, llm, 50, 'C')
+        summary = map_reduce_summary(all_indices, Propositions, llm, 50)
         ball["summary"] = summary
 
-    return C_balls
+    return E_balls
 
 def get_cluster_center_and_radius(idx_list, embeddings):
     embedding_list = []
@@ -1085,7 +1017,7 @@ def k_tags(current_indices, Propositions):
     return final_entity_list, final_tag_list
 
 # ==========================================
-# Vector-database bridge (supports D, C, A multi-level retrieval)
+# Vector-database bridge (supports E, D, A multi-level retrieval)
 # ==========================================
 class VectorDBHelper:
     def __init__(self, persist_directory="./rag_chroma_db"):
@@ -1099,33 +1031,15 @@ class VectorDBHelper:
             "hnsw:construction_ef": 100
         }
 
-        # three independent retrieval collections, one per level
-        self.d_collection = self.client.get_or_create_collection(name="d_balls_collection", metadata=hnsw_metadata)
-        self.c_collection = self.client.get_or_create_collection(name="c_balls_collection", metadata=hnsw_metadata)
+        # two independent retrieval collections, one per level
+        self.c_collection = self.client.get_or_create_collection(name="e_balls_collection", metadata=hnsw_metadata)
         self.a_collection = self.client.get_or_create_collection(name="a_props_collection", metadata=hnsw_metadata)
 
-    def add_d_balls(self, d_balls, embedding_model):
-        if not d_balls: return
-        ids = [b["idx"] for b in d_balls]
-        docs = [b["summary"] for b in d_balls]
-        embs = embedding_model.encode(docs).tolist()
-        metas = [{"tags": ", ".join(b["tags"]), "entity_list": ", ".join(b["entity_list"])} for b in d_balls]
-        batch_size = self.client.get_max_batch_size()
-        total_batches = (len(ids) + batch_size - 1) // batch_size
-        print(f"Writing {len(ids)} D-balls in {total_batches} batch(es), max {batch_size} per batch...")
-        for i in range(0, len(ids), batch_size):
-            self.d_collection.upsert(
-                ids=ids[i:i + batch_size],
-                embeddings=embs[i:i + batch_size],
-                documents=docs[i:i + batch_size],
-                metadatas=metas[i:i + batch_size],
-            )
-        print(f"[OK] Persisted {len(d_balls)} D-level balls to the vector database.")
 
-    def add_c_balls(self, c_balls, embedding_model):
-        if not c_balls: return
+    def add_e_balls(self, e_balls, embedding_model):
+        if not e_balls: return
         ids, docs, embs, metas = [], [], [], []
-        for ball in c_balls:
+        for ball in e_balls:
             ids.append(ball["idx"])
             doc_text = ball.get("summary", f"Entities: {', '.join(ball['entity_list'])}. Tags: {', '.join(ball['tags'])}.")
             docs.append(doc_text)
@@ -1134,7 +1048,7 @@ class VectorDBHelper:
 
         batch_size = self.client.get_max_batch_size()
         total_batches = (len(ids) + batch_size - 1) // batch_size
-        print(f"Writing {len(ids)} C-balls in {total_batches} batch(es), max {batch_size} per batch...")
+        print(f"Writing {len(ids)} E-balls in {total_batches} batch(es), max {batch_size} per batch...")
         for i in range(0, len(ids), batch_size):
             self.c_collection.upsert(
                 ids=ids[i:i + batch_size],
@@ -1142,7 +1056,7 @@ class VectorDBHelper:
                 documents=docs[i:i + batch_size],
                 metadatas=metas[i:i + batch_size],
             )
-        print(f"[OK] Persisted {len(c_balls)} C-level balls to the vector database.")
+        print(f"[OK] Persisted {len(e_balls)} E-level balls to the vector database.")
 
     def add_a_propositions(self, propositions, embedding_model):
         if not propositions:
@@ -1168,11 +1082,8 @@ class VectorDBHelper:
 
         print(f"[OK] Persisted {len(propositions)} A-level propositions to the vector database.")
 
-    def search_d_level(self, query_emb, top_k=2):
-        res = self.d_collection.query(query_embeddings=[query_emb.tolist()], n_results=top_k)
-        return res['ids'][0] if res['ids'] else []
 
-    def search_c_level(self, query_emb, top_k=3):
+    def search_e_level(self, query_emb, top_k=3):
         res = self.c_collection.query(query_embeddings=[query_emb.tolist()], n_results=top_k)
         return res['ids'][0] if res['ids'] else []
 
@@ -1180,23 +1091,18 @@ class VectorDBHelper:
         res = self.a_collection.query(query_embeddings=[query_emb.tolist()], n_results=top_k)
         return res['ids'][0] if res['ids'] else []
 
-def map_reduce_summary(idx_str, A_or_C_Balls_list, llm, length, target):
-    Propositions = []
+def map_reduce_summary(idx_str, Propositions, llm, length):
+    propositions = []
 
-    if target == "C":
-        for idx_item in idx_str:
-            _id = int(idx_item.split('_')[-1])
-            Propositions.append(A_or_C_Balls_list[_id]["proposition"])
-    else:
-        for idx_item in idx_str:
-            _id = int(idx_item.split('_')[-1])
-            Propositions.append(A_or_C_Balls_list[_id]["summary"])
+    for idx_item in idx_str:
+        _id = int(idx_item.split('_')[-1])
+        propositions.append(Propositions[_id]["proposition"])
 
     # Escape braces in proposition texts so PromptTemplate's str.format parsing
     # does not break (medical/encyclopedic texts often contain unpaired braces
     # such as "TGF-{beta}").
     safe_propositions = "\n".join(
-        str(p).replace("{", "{{").replace("}", "}}") for p in Propositions
+        str(p).replace("{", "{{").replace("}", "}}") for p in propositions
     )
     prompt_str = f"""Based on the following set of domain-specific propositions, generate a complete and concise abstract of no more than {length} words:
     {safe_propositions}
@@ -1213,7 +1119,7 @@ def map_reduce_summary(idx_str, A_or_C_Balls_list, llm, length, target):
 
     chain = prompt | llm
 
-    response = chain.invoke({"Propositions": Propositions,
+    response = chain.invoke({"Propositions": propositions,
                            "length": length})
     summary = response.content
     # print('summary:')
@@ -1224,7 +1130,7 @@ def map_reduce_summary(idx_str, A_or_C_Balls_list, llm, length, target):
 
 def build_full_graph(propositions, embedding_model, llm, vector_db_persist_dir="./graph_chroma_db"):
     """
-    Build the complete granular-ball hierarchy graph (A/B/C/D + edges).
+    Build the complete granular-ball hierarchy graph (A/E/D + edges).
 
     Args:
         propositions: List[dict] - A-level proposition list, each item with:
@@ -1238,10 +1144,9 @@ def build_full_graph(propositions, embedding_model, llm, vector_db_persist_dir="
         vector_db_persist_dir: str - vector database persistence directory
 
     Returns:
-        tuple: (C_balls, B_balls, D_balls, edges, db_helper)
-            - C_balls: List[dict] - C-level ball list
-            - B_balls: List[dict] - B-level ball list
-            - D_balls: List[dict] - D-level ball list
+        tuple: (E_balls, D_balls, edges, db_helper)
+            - E_balls: List[dict] - E-level (entity) ball list
+            - D_balls: List[dict] - D-level (domain) ball list
             - edges: List[dict] - edge list
             - db_helper: VectorDBHelper - vector database helper (data written)
     """
@@ -1258,13 +1163,11 @@ def build_full_graph(propositions, embedding_model, llm, vector_db_persist_dir="
                 cached_hash = f.read().strip()
             if cached_hash == props_hash:
                 print("[Cache] Cache is valid; skipping graph build and loading from cache...")
-                C_balls = json.load(open(os.path.join(cache_dir, "C_balls.json"), "r"))
-                B_balls = json.load(open(os.path.join(cache_dir, "B_balls.json"), "r"))
-                D_balls = json.load(open(os.path.join(cache_dir, "D_balls.json"), "r"))
+                E_balls = json.load(open(os.path.join(cache_dir, "E_balls.json"), "r"))
                 edges = json.load(open(os.path.join(cache_dir, "edges.json"), "r"))
                 db_helper = VectorDBHelper(persist_directory=vector_db_persist_dir)
                 print("[OK] Cache loaded!")
-                return C_balls, B_balls, D_balls, edges, db_helper
+                return E_balls, D_balls, edges, db_helper
         except Exception as e:
             print(f"[Warn] Cache load failed ({e}); rebuilding the graph...")
 
@@ -1275,120 +1178,103 @@ def build_full_graph(propositions, embedding_model, llm, vector_db_persist_dir="
     # Stage cache is keyed by the proposition hash, so interrupted builds resume safely.
     stage2 = _load_stage(cache_dir, props_hash, "entity_dict")
     if stage2 is None:
-        print("[2/9] Counting entity frequencies...", flush=True)
+        print("[2/8] Counting entity frequencies...", flush=True)
         pre_entity_dic = pre_fun_count(propositions, embedding_model)
         entity_dict = func_count(pre_entity_dic)
         _save_stage(cache_dir, props_hash, "entity_dict", entity_dict)
     else:
         entity_dict = stage2
-        print(f"[2/9] Reusing stage cache (entity clusters: {len(entity_dict)})", flush=True)
+        print(f"[2/8] Reusing stage cache (entity clusters: {len(entity_dict)})", flush=True)
     N, entity_idx = make_sureN(entity_dict)
     print(f"    High-frequency entity threshold N = {N}")
 
     # 3. embed all propositions
     embeddings = _load_stage(cache_dir, props_hash, "embeddings")
     if embeddings is None:
-        print("[3/9] Encoding proposition embeddings...", flush=True)
+        print("[3/8] Encoding proposition embeddings...", flush=True)
         texts = [item['proposition'] for item in propositions]
         embeddings = embedding_model.encode(texts, convert_to_numpy=True, show_progress_bar=True).tolist()
         _save_stage(cache_dir, props_hash, "embeddings", embeddings)
     else:
-        print("[3/9] Reusing stage cache (proposition embeddings)", flush=True)
+        print("[3/8] Reusing stage cache (proposition embeddings)", flush=True)
     embeddings = np.asarray(embeddings, dtype=np.float32)
     print(f"    {len(embeddings)} proposition vectors")
 
-    # 4. build C-level balls (entity balls)
-    stage4 = _load_stage(cache_dir, props_hash, "c_balls")
+    # 4. build E-level balls (entity balls)
+    stage4 = _load_stage(cache_dir, props_hash, "e_balls")
     if stage4 is None:
-        print("[4/9] Building C-level balls...", flush=True)
-        C_balls = Sphere_Clustering(entity_dict, embeddings, N, entity_idx, propositions)
-        _save_stage(cache_dir, props_hash, "c_balls", C_balls)
+        print("[4/8] Building E-level balls...", flush=True)
+        E_balls = build_e_balls(entity_dict, embeddings, N, entity_idx, propositions)
+        _save_stage(cache_dir, props_hash, "e_balls", E_balls)
     else:
-        C_balls = stage4
-        print("[4/9] Reusing stage cache (C balls)", flush=True)
-    print(f"    Initial C ball count: {len(C_balls)}")
+        E_balls = stage4
+        print("[4/8] Reusing stage cache (E balls)", flush=True)
+    print(f"    Initial E ball count: {len(E_balls)}")
 
-    # 5. absorb unclustered proposition nodes into C balls
-    stage5 = _load_stage(cache_dir, props_hash, "c_balls_unclustered")
+    # 5. absorb unclustered proposition nodes into E balls
+    stage5 = _load_stage(cache_dir, props_hash, "e_balls_unclustered")
     if stage5 is None:
-        print("[5/9] Processing unclustered nodes...", flush=True)
-        C_balls, one_node_list = unclustered_nodes_func(
-            entity_dict, C_balls, embeddings, len(propositions), embedding_model, llm, propositions
+        print("[5/8] Processing unclustered nodes...", flush=True)
+        E_balls, one_node_list = unclustered_nodes_func(
+            entity_dict, E_balls, embeddings, len(propositions), embedding_model, llm, propositions
         )
-        _save_stage(cache_dir, props_hash, "c_balls_unclustered", {"c_balls": C_balls, "one_node_list": one_node_list})
+        _save_stage(cache_dir, props_hash, "e_balls_unclustered", {"e_balls": E_balls, "one_node_list": one_node_list})
     else:
-        C_balls, one_node_list = stage5["c_balls"], stage5["one_node_list"]
-        print("[5/9] Reusing stage cache (unclustered-node processing)", flush=True)
-    print(f"    C ball count after processing: {len(C_balls)}; remaining isolated propositions: {len(one_node_list)}")
+        E_balls, one_node_list = stage5["e_balls"], stage5["one_node_list"]
+        print("[5/8] Reusing stage cache (unclustered-node processing)", flush=True)
+    print(f"    E ball count after processing: {len(E_balls)}; remaining isolated propositions: {len(one_node_list)}")
 
-    # 6. split B-level balls (domain balls) out of the C balls
-    stage6 = _load_stage(cache_dir, props_hash, "b_balls")
+    # 6. split D-level balls (domain balls) out of the E balls
+    stage6 = _load_stage(cache_dir, props_hash, "d_balls")
     if stage6 is None:
-        print("[6/9] Splitting B-level balls...", flush=True)
-        B_balls, C_balls = C_split_to_B(C_balls, propositions, embeddings, embedding_model)
-        _save_stage(cache_dir, props_hash, "b_balls", {"b_balls": B_balls, "c_balls": C_balls})
+        print("[6/8] Splitting D-level balls...", flush=True)
+        D_balls, E_balls = split_e_into_d_balls(E_balls, propositions, embeddings, embedding_model)
+        _save_stage(cache_dir, props_hash, "d_balls", {"d_balls": D_balls, "e_balls": E_balls})
     else:
-        B_balls, C_balls = stage6["b_balls"], stage6["c_balls"]
-        print("[6/9] Reusing stage cache (B balls)", flush=True)
-    print(f"    B ball count: {len(B_balls)}")
-
-    # 7. build edges between C balls (based on boundary-node entity overlap)
-    stage7 = _load_stage(cache_dir, props_hash, "edges")
-    if stage7 is None:
-        print("[7/9] Building edges between C balls...", flush=True)
-        C_balls, B_balls, edges, edges_key = make_boundary_edges(C_balls, B_balls, propositions, embeddings)
-        _save_stage(cache_dir, props_hash, "edges", {"c_balls": C_balls, "b_balls": B_balls, "edges": edges})
-    else:
-        C_balls, B_balls, edges = stage7["c_balls"], stage7["b_balls"], stage7["edges"]
-        edges_key = set()
-        print("[7/9] Reusing stage cache (edges)", flush=True)
-    print(f"    Edge count: {len(edges)}")
-
-    # 8. generate summaries for C balls
-    stage8 = _load_stage(cache_dir, props_hash, "c_balls_summary")
-    if stage8 is None:
-        print("[8/9] Generating C-ball summaries...", flush=True)
-        C_balls = C_map_reduce_summary(C_balls, llm, propositions)
-        _save_stage(cache_dir, props_hash, "c_balls_summary", C_balls)
-    else:
-        C_balls = stage8
-        print("[8/9] Reusing stage cache (C-ball summaries)", flush=True)
-
-    # 9. build D-level balls (topic balls)
-    stage9 = _load_stage(cache_dir, props_hash, "d_balls")
-    if stage9 is None:
-        print("[9/9] Building D-level balls...", flush=True)
-        D_balls = cluster_D_balls(C_balls, embedding_model, embeddings, llm)
-        _save_stage(cache_dir, props_hash, "d_balls", D_balls)
-    else:
-        D_balls = stage9
-        print("[9/9] Reusing stage cache (D balls)", flush=True)
+        D_balls, E_balls = stage6["d_balls"], stage6["e_balls"]
+        print("[6/8] Reusing stage cache (D balls)", flush=True)
     print(f"    D ball count: {len(D_balls)}")
 
-    # 10. write to the vector database
+    # 7. build edges between E balls (based on boundary-node entity overlap)
+    stage7 = _load_stage(cache_dir, props_hash, "edges")
+    if stage7 is None:
+        print("[7/8] Building edges between E balls...", flush=True)
+        E_balls, D_balls, edges, edges_key = make_boundary_edges(E_balls, D_balls, propositions, embeddings)
+        _save_stage(cache_dir, props_hash, "edges", {"e_balls": E_balls, "d_balls": D_balls, "edges": edges})
+    else:
+        E_balls, D_balls, edges = stage7["e_balls"], stage7["d_balls"], stage7["edges"]
+        edges_key = set()
+        print("[7/8] Reusing stage cache (edges)", flush=True)
+    print(f"    Edge count: {len(edges)}")
+
+    # 8. generate summaries for E balls
+    stage8 = _load_stage(cache_dir, props_hash, "e_balls_summary")
+    if stage8 is None:
+        print("[8/8] Generating E-ball summaries...", flush=True)
+        E_balls = summarize_e_balls(E_balls, llm, propositions)
+        _save_stage(cache_dir, props_hash, "e_balls_summary", E_balls)
+    else:
+        E_balls = stage8
+        print("[8/8] Reusing stage cache (E-ball summaries)", flush=True)
+
+    # 9. write to the vector database
     print("\n[Extra] Writing to the vector database...")
     db_helper = VectorDBHelper(persist_directory=vector_db_persist_dir)
-    db_helper.add_d_balls(D_balls, embedding_model)
-    db_helper.add_c_balls(C_balls, embedding_model)
+    db_helper.add_e_balls(E_balls, embedding_model)
     db_helper.add_a_propositions(propositions, embedding_model)
     print("    Vector database write complete!")
 
     print("\n" + "=" * 60)
     print("[OK] Granular-ball hierarchy graph built!")
     print(f"    A-level propositions: {len(propositions)}")
-    print(f"    B-level balls: {len(B_balls)}")
-    print(f"    C-level balls: {len(C_balls)}")
     print(f"    D-level balls: {len(D_balls)}")
+    print(f"    E-level balls: {len(E_balls)}")
     print(f"    Edges: {len(edges)}")
     print("=" * 60)
 
     # ---------- save the cache ----------
     os.makedirs(cache_dir, exist_ok=True)
-    json.dump(C_balls, open(os.path.join(cache_dir, "C_balls.json"), "w", encoding="utf-8"),
-              ensure_ascii=False, indent=2)
-    json.dump(B_balls, open(os.path.join(cache_dir, "B_balls.json"), "w", encoding="utf-8"),
-              ensure_ascii=False, indent=2)
-    json.dump(D_balls, open(os.path.join(cache_dir, "D_balls.json"), "w", encoding="utf-8"),
+    json.dump(E_balls, open(os.path.join(cache_dir, "E_balls.json"), "w", encoding="utf-8"),
               ensure_ascii=False, indent=2)
     json.dump(edges, open(os.path.join(cache_dir, "edges.json"), "w", encoding="utf-8"),
               ensure_ascii=False, indent=2)
@@ -1399,118 +1285,9 @@ def build_full_graph(propositions, embedding_model, llm, vector_db_persist_dir="
     # ----------------------------
 
 
-    return C_balls, B_balls, D_balls, edges, db_helper
+    return E_balls, D_balls, edges, db_helper
 
 
 # ==========================================
 # No-edges version of the graph builder (for ablation experiments)
 # ==========================================
-def build_full_graph_no_edges(propositions, embedding_model, llm, vector_db_persist_dir="./graph_chroma_db"):
-    """
-    Build the granular-ball hierarchy graph without edges (A/B/C/D, no edges
-    between C balls).
-
-    Differences from build_full_graph:
-    1. Skips [7/9] edge building between C balls.
-    2. Does not run make_boundary_edges.
-    3. Returns an empty edge list.
-    """
-    cache_dir = vector_db_persist_dir
-    props_hash = hashlib.md5(
-        json.dumps(propositions, sort_keys=True, ensure_ascii=False).encode()
-    ).hexdigest()
-    cache_flag_path = os.path.join(cache_dir, "build_cache_flag_no_edges.txt")
-
-    if os.path.exists(cache_flag_path):
-        try:
-            with open(os.path.join(cache_dir, "props_hash_no_edges.txt"), "r") as f:
-                cached_hash = f.read().strip()
-            if cached_hash == props_hash:
-                print("[Cache] Cache is valid (no-edges version); skipping graph build...")
-                C_balls = json.load(open(os.path.join(cache_dir, "C_balls_no_edges.json"), "r"))
-                B_balls = json.load(open(os.path.join(cache_dir, "B_balls_no_edges.json"), "r"))
-                D_balls = json.load(open(os.path.join(cache_dir, "D_balls_no_edges.json"), "r"))
-                edges = []  # no edges: return an empty list
-                db_helper = VectorDBHelper(persist_directory=vector_db_persist_dir)
-                return C_balls, B_balls, D_balls, edges, db_helper
-        except Exception as e:
-            print(f"[Warn] No-edges cache load failed ({e}); rebuilding the graph...")
-
-    print("=" * 60)
-    print("Building the no-edges granular-ball hierarchy graph...")
-    print("=" * 60)
-
-    # 2. pre-count entity frequencies
-    print("[2/9] Counting entity frequencies...")
-    pre_entity_dic = pre_fun_count(propositions, embedding_model)
-    entity_dict = func_count(pre_entity_dic)
-    N, entity_idx = make_sureN(entity_dict)
-    print(f"    High-frequency entity threshold N = {N}")
-
-    # 3. embed all propositions
-    print("[3/9] Encoding proposition embeddings...")
-    texts = [item['proposition'] for item in propositions]
-    embeddings = embedding_model.encode(texts, convert_to_numpy=True, show_progress_bar=True)
-    print(f"    {len(embeddings)} proposition vectors")
-
-    # 4. build C-level balls
-    print("[4/9] Building C-level balls...")
-    C_balls = Sphere_Clustering(entity_dict, embeddings, N, entity_idx, propositions)
-    print(f"    Initial C ball count: {len(C_balls)}")
-
-    # 5. process unclustered nodes
-    print("[5/9] Processing unclustered nodes...")
-    C_balls, one_node_list = unclustered_nodes_func(
-        entity_dict, C_balls, embeddings, len(propositions), embedding_model, llm, propositions
-    )
-    print(f"    C ball count after processing: {len(C_balls)}; remaining isolated propositions: {len(one_node_list)}")
-
-    # 6. split B-level balls
-    print("[6/9] Splitting B-level balls...")
-    B_balls, C_balls = C_split_to_B(C_balls, propositions, embeddings, embedding_model)
-    print(f"    B ball count: {len(B_balls)}")
-
-    # [7/9 edge building skipped]
-
-    # 7. generate summaries for C balls
-    print("[8/9] Generating C-ball summaries...")
-    C_balls = C_map_reduce_summary(C_balls, llm, propositions)
-
-    # 8. build D-level balls
-    print("[9/9] Building D-level balls...")
-    D_balls = cluster_D_balls(C_balls, embedding_model, embeddings, llm)
-    print(f"    D ball count: {len(D_balls)}")
-
-    # 9. write to the vector database
-    print("\n[Extra] Writing to the vector database...")
-    db_helper = VectorDBHelper(persist_directory=vector_db_persist_dir)
-    db_helper.add_d_balls(D_balls, embedding_model)
-    db_helper.add_c_balls(C_balls, embedding_model)
-    db_helper.add_a_propositions(propositions, embedding_model)
-    print("    Vector database write complete!")
-
-    edges = []  # no edges: return an empty list
-
-    print("\n" + "=" * 60)
-    print("[OK] No-edges granular-ball hierarchy graph built!")
-    print(f"    A-level propositions: {len(propositions)}")
-    print(f"    B-level balls: {len(B_balls)}")
-    print(f"    C-level balls: {len(C_balls)}")
-    print(f"    D-level balls: {len(D_balls)}")
-    print(f"    Edges: {len(edges)} (no-edges mode)")
-    print("=" * 60)
-
-    # save the cache
-    os.makedirs(cache_dir, exist_ok=True)
-    json.dump(C_balls, open(os.path.join(cache_dir, "C_balls_no_edges.json"), "w", encoding="utf-8"),
-              ensure_ascii=False, indent=2)
-    json.dump(B_balls, open(os.path.join(cache_dir, "B_balls_no_edges.json"), "w", encoding="utf-8"),
-              ensure_ascii=False, indent=2)
-    json.dump(D_balls, open(os.path.join(cache_dir, "D_balls_no_edges.json"), "w", encoding="utf-8"),
-              ensure_ascii=False, indent=2)
-    with open(os.path.join(cache_dir, "props_hash_no_edges.txt"), "w") as f:
-        f.write(props_hash)
-    with open(cache_flag_path, "w") as f:
-        f.write("1")
-
-    return C_balls, B_balls, D_balls, edges, db_helper

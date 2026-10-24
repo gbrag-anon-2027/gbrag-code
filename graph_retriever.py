@@ -1,19 +1,14 @@
 import heapq
 import json
 import difflib
-import math
 import os
 import time
 
 import numpy as np
 import collections
 from prompt import (
-    sufficiency_check_prompt,
     entity_extract_prompt,
-    entity_retry_prompt,
     _build_answer_prompt,
-    _build_d_summary_answer_prompt,
-    _build_d_summary_verified_answer_prompt,
     _build_forceful_answer_prompt,
 )
 from sklearn.metrics.pairwise import cosine_similarity
@@ -23,14 +18,9 @@ import re
 
 # Scale-control parameters for edge-enabled retrieval, defined in one place so
 # ablation experiments can tune them uniformly.
-C_ACTIVATION_THRESHOLD = 0.60
-MAX_INITIAL_C_SEEDS = 8
-DIRECT_EDGE_THRESHOLD = 0.60
 MIN_TRAVERSAL_EDGE_SIMILARITY = 0.25
 MAX_PATH_HOPS = 4
 MAX_PATH_COST = 2.40
-MAX_BRIDGE_FACTS = 30
-MAX_CONTEXT_CHARS = 48000
 
 
 # Edge texts depend only on the graph cache and the embedding model, so they
@@ -44,84 +34,6 @@ def calculate_similarity(emb1, emb2_list):
     return cosine_similarity([emb1], emb2_list)[0]
 
 
-def generate_final_context(
-    ordered_paths,
-    c_to_facts,
-    edge_info,
-    edge_texts_with_time=None,
-    initial_seed_ids=None,
-    max_bridge_facts=MAX_BRIDGE_FACTS,
-    max_context_chars=MAX_CONTEXT_CHARS,
-):
-    final_context_parts = []
-    used_c_balls = set()
-    used_bridge_texts = set()
-    current_char_count = 0
-    if edge_texts_with_time is None:
-        edge_texts_with_time = set()
-    if initial_seed_ids is None:
-        initial_seed_ids = []
-
-    def append_part(part):
-        nonlocal current_char_count
-        part = str(part or "").strip()
-        if not part:
-            return False
-        additional_chars = len(part) + (2 if final_context_parts else 0)
-        if current_char_count + additional_chars > max_context_chars:
-            return False
-        final_context_parts.append(part)
-        current_char_count += additional_chars
-        return True
-
-    def append_c_facts(c_idx, label="Core Knowledge Points"):
-        if c_idx in used_c_balls:
-            return
-        facts = c_to_facts.get(c_idx, [])
-        if facts:
-            fact_text = f"--- {label} ({c_idx}) ---\n" + "\n".join(
-                f"- {fact}" for fact in facts
-            )
-            append_part(fact_text)
-        used_c_balls.add(c_idx)
-
-    # All initial seeds are evidence directly hit by the query. Even when the
-    # seeds are not mutually connected, their core facts must be kept and must
-    # not be dropped just because ordered_paths is non-empty.
-    for seed_c_idx in initial_seed_ids:
-        append_c_facts(seed_c_idx, label="Seed Core Knowledge Points")
-
-    if not ordered_paths:
-        for c_idx, facts in c_to_facts.items():
-            append_c_facts(c_idx)
-        return "\n\n".join(final_context_parts)
-
-    for path in ordered_paths:
-        path_segments = []
-        for i in range(len(path)):
-            current_c = path[i]
-            if current_c not in used_c_balls:
-                facts = c_to_facts.get(current_c, [])
-                if facts:
-                    fact_str = f"[Facts extracted from {current_c}]:\n- " + "\n- ".join(list(facts))
-                    path_segments.append(fact_str)
-                used_c_balls.add(current_c)
-
-            if i < len(path) - 1:
-                next_c = path[i + 1]
-                edge_text = edge_info.get((current_c, next_c)) or edge_info.get((next_c, current_c))
-                if (
-                    edge_text
-                    and edge_text not in used_bridge_texts
-                    and len(used_bridge_texts) < max_bridge_facts
-                ):
-                    tag = " [time]" if edge_text in edge_texts_with_time else ""
-                    path_segments.append(f"==>{tag} [Multi-hop Bridge Clue]: {edge_text}")
-                    used_bridge_texts.add(edge_text)
-        if path_segments:
-            append_part("\n".join(path_segments))
-
-    return "\n\n=== Complete Multi-hop Reasoning Chain ===\n\n" + "\n\n".join(final_context_parts)
 
 def _dedupe_preserve_order(items):
     seen = set()
@@ -153,7 +65,7 @@ def _entity_acronym(value):
 
 
 def _entity_name_match_quality(query_entity, graph_entity):
-    """Entity-name linking only; this never compares a query with a C summary."""
+    """Entity-name linking only; this never compares a query with an E summary."""
     query_name = _normalize_entity_name(query_entity)
     graph_name = _normalize_entity_name(graph_entity)
     if not query_name or not graph_name:
@@ -191,150 +103,11 @@ def _is_hard_entity_reason(reason):
         for marker in ("exact", "alias", "lexical")
     )
 
-def _score_b_ball(
-    b_ball,
-    query_entity_set,
-    query_domains_list,
-    embedding_model,
-    query_missing_entity=None,
-    is_time_query=False,
-    query_focus=None,
-    query_focus_emb=None,
-    query_domains_emb=None,
-    query_missing_emb=None,
-    b_tags_emb=None,
-    b_entity_emb=None,
-):
-    """
-    Multi-dimensional scoring for a B-level ball.
-    Returns the total score (0~1) and a per-dimension breakdown.
-    Higher scores mean the B ball should be kept.
-    Precomputed embeddings (*_emb arguments) skip internal encode() calls and
-    are used directly for cosine similarity.
-    """
-    score = 0.0
-    breakdown = {}
-
-    # --- Dimension 1: domain similarity (weight 0.40) ---
-    b_tags_list = list(b_ball.get("tags", []))
-    if b_tags_list and query_domains_list:
-        if query_domains_emb is not None and b_tags_emb is not None:
-            domain_sim = float(cosine_similarity([query_domains_emb], [b_tags_emb])[0][0])
-        else:
-            domain_sim = semantic_set_similarity(
-                query_domains_list, b_tags_list, embedding_model
-            )
-        score += 0.40 * domain_sim
-        breakdown["domain"] = round(domain_sim, 3)
-    else:
-        breakdown["domain"] = 0.0
-
-    # --- Dimension 2: entity overlap (weight 0.60) ---
-    b_entity_set = set([str(e).lower().strip() for e in b_ball.get("entity_list", [])])
-    entity_overlap = b_entity_set & query_entity_set
-
-    if entity_overlap:
-        # 1 entity covered: +0.30, 2: +0.45, 3+: +0.60
-        overlap_count = len(entity_overlap)
-        entity_bonus = min(0.60, 0.15 + 0.15 * overlap_count)
-        score += entity_bonus
-        breakdown["entity_exact"] = round(entity_bonus, 3)
-        breakdown["entity_overlap"] = list(entity_overlap)
-    else:
-        # No lexical overlap: fall back to semantic similarity.
-        if b_entity_set and query_entity_set:
-            entity_sim = semantic_set_similarity(
-                list(b_entity_set), list(query_entity_set), embedding_model
-            )
-            if entity_sim > 0.5:
-                fuzzy_bonus = 0.30 * entity_sim
-                score += fuzzy_bonus
-                breakdown["entity_fuzzy"] = round(fuzzy_bonus, 3)
-            else:
-                breakdown["entity_fuzzy"] = 0.0
-        else:
-            breakdown["entity_fuzzy"] = 0.0
-
-    # --- Dimension 3: missing_entities match (weight 0.15, extra bonus) ---
-    if query_missing_entity:
-        missing_set = set(
-            [str(e).lower().strip() for e in query_missing_entity if e]
-        )
-        if b_entity_set and missing_set:
-            if query_missing_emb is not None and b_entity_emb is not None:
-                missing_sim = float(cosine_similarity([query_missing_emb], [b_entity_emb])[0][0])
-            else:
-                missing_sim = semantic_set_similarity(
-                    list(b_entity_set), list(missing_set), embedding_model
-                )
-            if missing_sim > 0.4:
-                missing_bonus = 0.15 * missing_sim
-                score += missing_bonus
-                breakdown["missing_fuzzy"] = round(missing_bonus, 3)
-            else:
-                breakdown["missing_fuzzy"] = 0.0
-        else:
-            breakdown["missing_fuzzy"] = 0.0
-    else:
-        breakdown["missing_fuzzy"] = 0.0
-
-    # ====== Dimension 4: time-entity bonus (for time questions) ======
-    if is_time_query:
-        time_indices = b_ball.get("time_indices", [])
-        if time_indices:
-            total_props_in_ball = len(b_ball.get("all_indices", []))
-            # Fraction of time propositions in the ball.
-            time_ratio = len(time_indices) / max(total_props_in_ball, 1)
-
-            # Plan A: ratio-aware linear mapping (recommended). The bonus
-            # reaches its cap of 0.35 when time propositions make up >= 30%,
-            # and scales linearly below that.
-            time_bonus = min(0.35, 0.10 + 0.25 * min(1.0, time_ratio / 0.30))
-
-            # Plan B (alternative): keep an absolute-count term for further
-            # discrimination.
-            # time_bonus = min(0.35,
-            #     0.10 + 0.25 * min(1.0, time_ratio / 0.30) +  # density term (0~0.25)
-            #     0.05 * min(1.0, len(time_indices) / 5.0)      # absolute-count term (0~0.05)
-            # )
-
-            score += time_bonus
-            breakdown["time_bonus"] = round(time_bonus, 3)
-            breakdown["time_ratio"] = round(time_ratio, 3)  # debug info
-        else:
-            breakdown["time_bonus"] = 0.0
-    else:
-        breakdown["time_bonus"] = 0.0
-    # ====== end of dimension 4 ======
-
-    # --- Dimension 5: generic query relation/attribute (small auxiliary
-    # weight; does not replace the entity and structure rules) ---
-    focus_text = str(query_focus or "").strip()
-    focus_descriptors = _dedupe_preserve_order(
-        b_tags_list + list(b_entity_set)
-    )
-    if focus_text and focus_descriptors and embedding_model is not None:
-        if query_focus_emb is not None and b_tags_emb is not None:
-            # Precomputed vectors: similarity of focus vs tags.
-            focus_sim = float(cosine_similarity([query_focus_emb], [b_tags_emb])[0][0])
-        else:
-            focus_sim = semantic_set_similarity(
-                [focus_text], focus_descriptors, embedding_model
-            )
-        focus_bonus = 0.10 * max(0.0, float(focus_sim))
-        score += focus_bonus
-        breakdown["query_focus"] = round(focus_bonus, 3)
-        breakdown["query_focus_similarity"] = round(float(focus_sim), 3)
-    else:
-        breakdown["query_focus"] = 0.0
-
-    breakdown["total"] = round(score, 3)
-    return score, breakdown
 
 
 def _score_a_propositions(propositions, proposition_embeddings, query_embedding,
                           focus_embedding, query_entities, structural_entities):
-    """Batch-score non-center A evidence inside one selected B ball."""
+    """Batch-score non-center A evidence inside one selected D ball."""
     if not propositions:
         return []
 
@@ -379,39 +152,28 @@ def _score_a_propositions(propositions, proposition_embeddings, query_embedding,
         }))
     return results
 
-def _build_semantic_fallback_context(query_emb, k_d_balls, c_balls_dict, Propositions, db_helper, preferred_c_ids=None,
-                                     top_c=4, top_a=10):
+def _build_semantic_fallback_context(query_emb, e_balls_dict, Propositions, db_helper, preferred_e_ids=None,
+                                     top_e=4, top_a=10):
     context_sections = []
 
-    if k_d_balls:
-        d_lines = [
-            f"{d_ball['idx']}: {d_ball.get('summary', '')}"
-            for d_ball in k_d_balls
-            if d_ball.get("summary")
-        ]
-        if d_lines:
-            context_sections.append(
-                "Relevant high-level summaries:\n" + "\n".join(f"- {line}" for line in d_lines)
-            )
-
-    candidate_c_ids = []
-    if preferred_c_ids:
-        candidate_c_ids.extend(preferred_c_ids)
+    candidate_e_ids = []
+    if preferred_e_ids:
+        candidate_e_ids.extend(preferred_e_ids)
     if db_helper is not None:
         try:
-            candidate_c_ids.extend(db_helper.search_c_level(query_emb, top_k=top_c))
+            candidate_e_ids.extend(db_helper.search_e_level(query_emb, top_k=top_e))
         except Exception as e:
-            print(f"C-level vector fallback search failed: {e}")
+            print(f"E-level vector fallback search failed: {e}")
 
-    candidate_c_ids = _dedupe_preserve_order(candidate_c_ids)
+    candidate_e_ids = _dedupe_preserve_order(candidate_e_ids)
     c_lines = []
-    for c_idx in candidate_c_ids:
-        c_ball = c_balls_dict.get(c_idx)
-        if not c_ball:
+    for e_idx in candidate_e_ids:
+        e_ball = e_balls_dict.get(e_idx)
+        if not e_ball:
             continue
-        summary = str(c_ball.get("summary", "")).strip()
+        summary = str(e_ball.get("summary", "")).strip()
         if summary:
-            c_lines.append(f"{c_idx}: {summary}")
+            c_lines.append(f"{e_idx}: {summary}")
 
     if c_lines:
         context_sections.append(
@@ -458,27 +220,6 @@ def _clean_answer_text(answer):
 
     return text
 
-def _looks_like_short_answer(answer):
-    text = _clean_answer_text(answer)
-    if text.lower() == "unknown":
-        return True
-
-    word_count = len(text.split())
-    if "\n" in text or len(text) > 80 or word_count > 8:
-        return False
-
-    lowered = text.lower()
-    if text.endswith(".") and word_count > 3:
-        return False
-
-    sentence_markers = [
-        " is ", " was ", " were ", " are ", " means ", " refers to ",
-        " because ", " which ", " who ", " that "
-    ]
-    if word_count > 4 and any(marker in f" {lowered} " for marker in sentence_markers):
-        return False
-
-    return True
 
 def _answer_from_context(query, context, llm):
     context = str(context or "").strip()
@@ -509,38 +250,7 @@ def _answer_from_context(query, context, llm):
         return "unknown"
 
 
-def _answer_from_context_forceful(query, context, llm):
-    """Forced answer extraction: the LLM must extract the most likely answer from the context."""
-    context = str(context or "").strip()
-    if not context:
-        return "unknown"
 
-    try:
-        forceful_prompt = _build_forceful_answer_prompt()
-        answer = (forceful_prompt | llm).invoke({
-            "query": query,
-            "context": context
-        }).content
-        return _clean_answer_text(answer)
-    except Exception as e:
-        print(f"Forced answer extraction failed: {e}")
-        return "unknown"
-
-def _reconstruct_path(parent_map, start_node, target_node):
-    if start_node == target_node:
-        return [start_node]
-    if target_node not in parent_map:
-        return None
-
-    path = [target_node]
-    current = target_node
-    while current != start_node:
-        current = parent_map.get(current)
-        if current is None:
-            return None
-        path.append(current)
-    path.reverse()
-    return path
 
 
 def _get_cached_edge_embeddings(edges, embedding_model):
@@ -681,30 +391,6 @@ def _minimum_spanning_seed_paths(seed_ids, pair_paths):
     return selected_paths
 
 
-def _path_component_sizes(nodes, paths):
-    adjacency = collections.defaultdict(set)
-    node_set = set(nodes)
-    for path in paths:
-        node_set.update(path)
-        for left, right in zip(path, path[1:]):
-            adjacency[left].add(right)
-            adjacency[right].add(left)
-
-    remaining = set(node_set)
-    component_sizes = []
-    while remaining:
-        start = remaining.pop()
-        stack = [start]
-        size = 1
-        while stack:
-            current = stack.pop()
-            for neighbor in adjacency.get(current, set()):
-                if neighbor in remaining:
-                    remaining.remove(neighbor)
-                    stack.append(neighbor)
-                    size += 1
-        component_sizes.append(size)
-    return component_sizes
 
 def semantic_set_similarity(set1, set2, model):
     """Cosine similarity between the mean embeddings of two tag sets."""
@@ -747,7 +433,7 @@ def semantic_set_similarity(set1, set2, model):
 
 
 # ============================================================
-# P1: B-ball entry + two-stage ("lexical -> semantic") in-ball recall
+# P1: D-ball entry + two-stage ("lexical -> semantic") in-ball recall
 # + global quantity fallback. Only the retrieval entry and recall method are
 # replaced; the hierarchy and edges stay unchanged. All thresholds can be
 # overridden by environment variables.
@@ -774,14 +460,14 @@ def _get_a_embeddings_idx(Propositions, embedding_model, db_helper):
     return idx_to_emb
 
 
-def _get_b_ball_centroids(B_balls, Propositions, embedding_model, db_helper):
-    """B-ball centroid = mean of member A-proposition vectors. Cached by id(B_balls) so a 50-question run computes it once."""
-    cache_key = id(B_balls)
+def _get_d_ball_centroids(D_balls, Propositions, embedding_model, db_helper):
+    """D-ball centroid = mean of member A-proposition vectors. Cached by id(D_balls) so a 50-question run computes it once."""
+    cache_key = id(D_balls)
     if cache_key in _P1_B_CENTROID_CACHE:
         return _P1_B_CENTROID_CACHE[cache_key]
     idx_to_emb = _get_a_embeddings_idx(Propositions, embedding_model, db_helper)
     centroids = {}
-    for ball in B_balls:
+    for ball in D_balls:
         embs = []
         for idx in ball.get("all_indices", []):
             try:
@@ -840,7 +526,7 @@ def _chunk_gate(query, embedding_model):
         ids = [list(chunk_map.keys())[int(i)] for i in order]
         return set(ids), ids
     except Exception as exc:
-        print(f"v18 raw-chunk gate failed; falling back to global B balls: {exc}")
+        print(f"v18 raw-chunk gate failed; falling back to global D balls: {exc}")
         return set(), []
 
 
@@ -862,12 +548,12 @@ def _strict_edge_entity_match(edge, query_entities):
     return None
 
 
-def _best_props_for_c(cid, c_by_id, b_map, Propositions, idx_to_emb, query_emb, embedding_model, limit):
-    """Top-`limit` (sim, text) A propositions inside C ball `cid` by query similarity."""
-    c = c_by_id.get(cid, {})
+def _best_props_for_e(eid, e_by_id, d_map, Propositions, idx_to_emb, query_emb, embedding_model, limit):
+    """Top-`limit` (sim, text) A propositions inside E ball `eid` by query similarity."""
+    c = e_by_id.get(eid, {})
     candidates = []
-    for bid in c.get("b_indices", []):
-        ball = b_map.get(bid, {})
+    for bid in c.get("d_indices", []):
+        ball = d_map.get(bid, {})
         for raw in ball.get("all_indices", []):
             try:
                 idx = int(str(raw).split("_")[-1])
@@ -886,9 +572,9 @@ def _best_props_for_c(cid, c_by_id, b_map, Propositions, idx_to_emb, query_emb, 
     return sorted(candidates, reverse=True)[:limit]
 
 
-def Graph_Rag_pipeline(query, C_balls, B_balls, edges, Propositions,
+def Graph_Rag_pipeline(query, E_balls, D_balls, edges, Propositions,
                        llm, embedding_model, db_helper, enable_edge_propagation=True,
-                       enable_fallback=False, return_trace=False,
+                       return_trace=False,
                        experiment_config=None):
     started = time.perf_counter()
     no_chunk_gate = _flag("GBRAG_V18_NO_CHUNK_GATE")
@@ -899,14 +585,14 @@ def Graph_Rag_pipeline(query, C_balls, B_balls, edges, Propositions,
     no_supp = _flag("GBRAG_V18_NO_SUPP")
     supp_only = _flag("GBRAG_V18_SUPP_ONLY")
     # Low-budget ablations: GBRAG_V18_NO_BRIDGE=1 disables bridge propositions;
-    # GBRAG_V18_NO_C_SUMMARY=1 disables C-level summaries.
+    # GBRAG_V18_NO_C_SUMMARY=1 disables E-level summaries.
     no_bridge = _flag("GBRAG_V18_NO_BRIDGE")
     no_c_summary = _flag("GBRAG_V18_NO_C_SUMMARY")
 
     query_emb = embedding_model.encode([query])[0]
 
     # --- FLAT baseline (for experiments): plain proposition retrieval ---
-    # GBRAG_V18_FLAT=1 skips the ball gating / B-ball recall / path activation /
+    # GBRAG_V18_FLAT=1 skips the ball gating / D-ball recall / path activation /
     # dual-pool assembly and directly takes the semantic top-K over all A-level
     # propositions (K defaults to 32, aligned with the average v18 context
     # proposition count), to quantify the increment of "balls + paths" over
@@ -934,28 +620,26 @@ def Graph_Rag_pipeline(query, C_balls, B_balls, edges, Propositions,
         end = time.perf_counter()
         trace = {
             "retrieved_context": context, "experiment_id": "DCB_v18_dual_pool",
-            "p1_top_b": [], "v15_top_chunk_ids": [],
-            "v15_gated_b_count": 0, "v15_entity_c_candidate_count": 0,
-            "v15_entity_b_bonus_count": 0, "v11_parent_c_seeds": [],
+            "p1_top_d": [], "v15_top_chunk_ids": [],
+            "v15_gated_d_count": 0, "v15_entity_e_candidate_count": 0,
+            "v15_entity_d_bonus_count": 0, "v11_parent_e_seeds": [],
             "selected_paths": [], "context_paths": [],
             "activated_node_type": "flat_proposition", "activated_node_count": len(flat_facts),
             "path_activated": False, "path_count": 0,
             "avg_path_length": 0.0, "max_path_length": 0,
             "activated_relation_count": 0,
             "selected_fact_count": len(flat_facts),
-            "v18_supplement_count": 0, "v18_bridge_count": 0, "v18_c_summary_count": 0,
+            "v18_supplement_count": 0, "v18_bridge_count": 0, "v18_e_summary_count": 0,
             "v18_middle_added": 0, "v18_entity_added": 0,
             "v18_fallback_used": False,
             "v18_ablation": {"flat": True, "flat_top_k": flat_top_k},
-            "is_d_summary_answer": False,
             "retrieval_seconds": round(end - started, 6),
             "answer_generation_seconds": round(end - answer_started, 6),
             "path_search_seconds": round(end - started, 6),
             "v11_path_edge_candidates": 0,
         }
-        return (answer, False, trace) if return_trace else answer
+        return (answer, trace) if return_trace else answer
 
-        gated_chunks, top_chunk_ids = set(), []
     else:
         gated_chunks, top_chunk_ids = _chunk_gate(query, embedding_model)
 
@@ -969,10 +653,10 @@ def Graph_Rag_pipeline(query, C_balls, B_balls, edges, Propositions,
     query_focus = str(entity_data.get("query_focus", query) if isinstance(entity_data, dict) else query).strip()
     focus_emb = embedding_model.encode([query_focus])[0]
 
-    top_b = _env_int("GBRAG_V17_TOP_B", 4)
+    top_d = _env_int("GBRAG_V17_TOP_B", 4)
     score_keep = _env_int("GBRAG_V11_SCORE_KEEP", 5)
     final_keep = _env_int("GBRAG_V11_FINAL_KEEP", 15)
-    c_limit = _env_int("GBRAG_V17_MAX_C_SEEDS", 8)
+    e_limit = _env_int("GBRAG_V17_MAX_C_SEEDS", 8)
     path_hops = _env_int("GBRAG_V11_MAX_PATH_HOPS", 4)
     middle_facts = _env_int("GBRAG_V18_MIDDLE_FACTS", 3)
     entity_facts = _env_int("GBRAG_V18_ENTITY_C_FACTS", 2)
@@ -982,24 +666,24 @@ def Graph_Rag_pipeline(query, C_balls, B_balls, edges, Propositions,
     top_bridge = _env_int("GBRAG_P1_TOP_BRIDGE", 10)
     bridge_min_sim = float(os.environ.get("GBRAG_P1_BRIDGE_MIN_SIM", "0.60"))
 
-    all_centroids = _get_b_ball_centroids(B_balls, Propositions, embedding_model, db_helper)
-    b_map = {b["idx"]: b for b in B_balls}
-    c_by_id = {c["idx"]: c for c in C_balls}
+    all_centroids = _get_d_ball_centroids(D_balls, Propositions, embedding_model, db_helper)
+    d_map = {b["idx"]: b for b in D_balls}
+    e_by_id = {c["idx"]: c for c in E_balls}
     prop_by_num = {i: p for i, p in enumerate(Propositions)}
 
-    # --- entity-activated C balls (ablation: NO_ENTITY_C) ---
-    entity_c = []
+    # --- entity-activated E balls (ablation: NO_ENTITY_C) ---
+    entity_e = []
     if not no_entity_c:
         entity_norms = [_normalize_entity_name(x.get("name", x) if isinstance(x, dict) else x) for x in query_entities]
-        for c in C_balls:
+        for c in E_balls:
             c_entities = [_normalize_entity_name(x) for x in c.get("entity_list", [])]
             if entity_norms and any(q and (q == ce or (len(q.split()) >= 2 and (q in ce or ce in q)))
                                     for q in entity_norms for ce in c_entities):
-                entity_c.append(c["idx"])
-    entity_b = {str(bid) for cid in entity_c for bid in c_by_id.get(cid, {}).get("b_indices", [])}
+                entity_e.append(c["idx"])
+    entity_d = {str(bid) for eid in entity_e for bid in e_by_id.get(eid, {}).get("d_indices", [])}
 
-    # --- Top-J chunk gate over B-ball candidates (soft, with global supplement) ---
-    def b_matches_gate(ball):
+    # --- Top-J chunk gate over D-ball candidates (soft, with global supplement) ---
+    def d_matches_gate(ball):
         if not gated_chunks:
             return True
         for raw in ball.get("all_indices", []):
@@ -1011,11 +695,11 @@ def Graph_Rag_pipeline(query, C_balls, B_balls, edges, Propositions,
                 continue
         return False
 
-    centroids = {bid: emb for bid, emb in all_centroids.items() if b_matches_gate(b_map.get(bid, {}))}
+    centroids = {bid: emb for bid, emb in all_centroids.items() if d_matches_gate(d_map.get(bid, {}))}
     if len(centroids) < _env_int("GBRAG_V12_MIN_GATED_B", 4):
         centroids = dict(all_centroids)
     else:
-        # Recall safeguard: keep a few globally closest B balls as a supplement.
+        # Recall safeguard: keep a few globally closest D balls as a supplement.
         global_rank = sorted(
             zip(calculate_similarity(query_emb, list(all_centroids.values())), all_centroids.keys()),
             reverse=True,
@@ -1024,18 +708,18 @@ def Graph_Rag_pipeline(query, C_balls, B_balls, edges, Propositions,
             if bid not in centroids:
                 centroids[bid] = all_centroids[bid]
 
-    # --- B-ball recall (+ optional entity bonus, ablation: NO_DOMAIN_BONUS) ---
+    # --- D-ball recall (+ optional entity bonus, ablation: NO_DOMAIN_BONUS) ---
     ranked_pairs = []
     for sim, bid in zip(calculate_similarity(query_emb, list(centroids.values())), centroids.keys()):
-        bonus = 0.03 if (not no_domain_bonus and str(bid) in entity_b) else 0.0
+        bonus = 0.03 if (not no_domain_bonus and str(bid) in entity_d) else 0.0
         ranked_pairs.append((float(sim) + bonus, bid))
-    selected_b = [bid for _, bid in sorted(ranked_pairs, key=lambda x: x[0], reverse=True)[:top_b]]
+    selected_d = [bid for _, bid in sorted(ranked_pairs, key=lambda x: x[0], reverse=True)[:top_d]]
 
     # --- in-ball A-proposition scoring (identical to v5/v17) ---
     idx_to_emb = _get_a_embeddings_idx(Propositions, embedding_model, db_helper)
     pooled = []
-    for bid in selected_b:
-        ball = b_map.get(bid)
+    for bid in selected_d:
+        ball = d_map.get(bid)
         if not ball:
             continue
         props, embs = [], []
@@ -1060,12 +744,12 @@ def Graph_Rag_pipeline(query, C_balls, B_balls, edges, Propositions,
     final_pool = sorted(unique.values(), key=lambda x: x[2], reverse=True)[:final_keep]
     max_semantic = max((x[2] for x in final_pool), default=0.0)
 
-    # --- parent C balls ---
-    b_to_c = {}
-    for c in C_balls:
-        for bid in c.get("b_indices", []):
-            b_to_c.setdefault(str(bid), c["idx"])
-    seed_c = [cid for cid in dict.fromkeys(b_to_c.get(str(b)) for b in selected_b if str(b) in b_to_c) if cid is not None][:c_limit]
+    # --- parent E balls ---
+    d_to_e = {}
+    for c in E_balls:
+        for bid in c.get("d_indices", []):
+            d_to_e.setdefault(str(bid), c["idx"])
+    seed_e = [eid for eid in dict.fromkeys(d_to_e.get(str(b)) for b in selected_d if str(b) in d_to_e) if eid is not None][:e_limit]
 
     # --- path search (ablation: NO_PATH) ---
     paths, edge_info = [], {}
@@ -1077,7 +761,7 @@ def Graph_Rag_pipeline(query, C_balls, B_balls, edges, Propositions,
             relation_similarity = {t: float(s) for t, s in zip(edge_texts, calculate_similarity(query_emb, edge_embs))}
         graph = collections.defaultdict(set); weights = {}; sims = {}
         for edge in edges:
-            u, w = edge.get("node_C_1"), edge.get("node_C_2")
+            u, w = edge.get("node_E_1"), edge.get("node_E_2")
             sim = relation_similarity.get(str(edge.get("relation", "")), 0.0)
             entity_match = _strict_edge_entity_match(edge, query_entities)
             if sim < min_edge_sim or entity_match is False or (entity_match is None and sim < 0.55):
@@ -1089,66 +773,66 @@ def Graph_Rag_pipeline(query, C_balls, B_balls, edges, Propositions,
                     sims[(a, b)] = sim; weights[(a, b)] = weight; edge_info[(a, b)] = edge.get("relation", "")
         path_started = time.perf_counter()
         pair_paths = {}
-        for i, start in enumerate(seed_c):
-            for target in seed_c[i + 1:]:
+        for i, start in enumerate(seed_e):
+            for target in seed_e[i + 1:]:
                 path, cost = _bounded_shortest_path(graph, weights, sims, start, target, max_hops=path_hops,
                                                         max_cost=float(os.environ.get("GBRAG_V11_MAX_PATH_COST", "2.4")),
                                                         min_edge_similarity=min_edge_sim)
                 if path:
                     pair_paths[(start, target)] = (cost, path)
-        paths = _minimum_spanning_seed_paths(seed_c, pair_paths)
+        paths = _minimum_spanning_seed_paths(seed_e, pair_paths)
     else:
         path_started = time.perf_counter()
-    path_c = set(seed_c)
+    path_e = set(seed_e)
     for p in paths:
-        path_c.update(p)
+        path_e.update(p)
 
     # --- fact pools ---
     # facts from final_pool keyed by parent C
-    c_to_facts = collections.defaultdict(list)
+    e_to_facts = collections.defaultdict(list)
     for text, _, _, bid in final_pool:
-        cid = b_to_c.get(str(bid))
-        if cid is not None:
-            c_to_facts[cid].append(text)
+        eid = d_to_e.get(str(bid))
+        if eid is not None:
+            e_to_facts[eid].append(text)
     # supplementary middle-C facts: NOT chunk-gated (double gating fix)
     middle_added = []
-    for cid in path_c:
-        if cid not in c_to_facts:
-            facts = [t for _, t in _best_props_for_c(cid, c_by_id, b_map, Propositions, idx_to_emb, query_emb, embedding_model, middle_facts)]
-            c_to_facts[cid].extend(facts)
+    for eid in path_e:
+        if eid not in e_to_facts:
+            facts = [t for _, t in _best_props_for_e(eid, e_by_id, d_map, Propositions, idx_to_emb, query_emb, embedding_model, middle_facts)]
+            e_to_facts[eid].extend(facts)
             middle_added.extend(facts)
-    # entity-activated C balls outside the path set contribute their best facts
+    # entity-activated E balls outside the path set contribute their best facts
     # too. The entity matcher is intentionally loose (v17 only used it for a
     # +0.03 bonus), so cap how many balls may contribute: GBRAG_V18_ENTITY_C_MAX_BALLS,
     # ranked by each ball's best proposition similarity. 0 = unlimited (v18.0 behavior).
     entity_added = []
     entity_ball_facts = []
-    for cid in entity_c:
-        if cid in path_c or cid in c_to_facts:
+    for eid in entity_e:
+        if eid in path_e or eid in e_to_facts:
             continue
-        scored = _best_props_for_c(cid, c_by_id, b_map, Propositions, idx_to_emb, query_emb, embedding_model, entity_facts)
+        scored = _best_props_for_e(eid, e_by_id, d_map, Propositions, idx_to_emb, query_emb, embedding_model, entity_facts)
         if scored:
-            entity_ball_facts.append((scored[0][0], cid, scored))
+            entity_ball_facts.append((scored[0][0], eid, scored))
     max_entity_balls = _env_int("GBRAG_V18_ENTITY_C_MAX_BALLS", 0)
     if max_entity_balls > 0:
         entity_ball_facts.sort(key=lambda x: x[0], reverse=True)
         entity_ball_facts = entity_ball_facts[:max_entity_balls]
-    for _, cid, scored in entity_ball_facts:
+    for _, eid, scored in entity_ball_facts:
         facts = [t for _, t in scored]
-        c_to_facts[cid].extend(facts)
+        e_to_facts[eid].extend(facts)
         entity_added.extend(facts)
 
     emitted = set()
-    for facts in c_to_facts.values():
+    for facts in e_to_facts.values():
         for t in facts:
             emitted.add(t)
 
-    # --- bridge propositions (v5-style, from activated C balls) ---
-    activated_c = set(seed_c) | path_c
+    # --- bridge propositions (v5-style, from activated E balls) ---
+    activated_c = set(seed_e) | path_e
     bridge_texts = []
     if edges and activated_c and not no_bridge:
         try:
-            cand_edges = [e for e in edges if e.get("node_C_1") in activated_c or e.get("node_C_2") in activated_c]
+            cand_edges = [e for e in edges if e.get("node_E_1") in activated_c or e.get("node_E_2") in activated_c]
             relations = [str(e.get("relation", "")).strip() for e in cand_edges]
             rel_embs = embedding_model.encode([r for r in relations if r]) if any(relations) else []
             rel_sims = calculate_similarity(query_emb, list(rel_embs)) if len(rel_embs) else []
@@ -1162,18 +846,18 @@ def Graph_Rag_pipeline(query, C_balls, B_balls, edges, Propositions,
         except Exception as exc:
             print(f"v18 bridge-proposition collection failed: {exc}")
 
-    # --- C-level summaries (v5-style) ---
+    # --- E-level summaries (v5-style) ---
     c_lines = []
     if not no_c_summary:
         try:
-            for c_idx in db_helper.search_c_level(query_emb, top_k=3):
-                c_ball = c_by_id.get(c_idx)
-                if c_ball and str(c_ball.get("summary", "")).strip():
-                    line = f"{c_idx}: {c_ball['summary']}"
+            for e_idx in db_helper.search_e_level(query_emb, top_k=3):
+                e_ball = e_by_id.get(e_idx)
+                if e_ball and str(e_ball.get("summary", "")).strip():
+                    line = f"{e_idx}: {e_ball['summary']}"
                     if line not in c_lines:
                         c_lines.append(line)
         except Exception as exc:
-            print(f"v18 C-level summary supplement failed: {exc}")
+            print(f"v18 E-level summary supplement failed: {exc}")
 
     # --- context assembly ---
     fallback_triggered = (pooled_raw_count < min_props) or (max_semantic < fallback_min_sim)
@@ -1184,8 +868,8 @@ def Graph_Rag_pipeline(query, C_balls, B_balls, edges, Propositions,
     supplement = []
     if fallback_used:
         context = _build_semantic_fallback_context(
-            query_emb, [], c_by_id, Propositions, db_helper,
-            preferred_c_ids=None, top_c=4, top_a=fallback_top_a,
+            query_emb, e_by_id, Propositions, db_helper,
+            preferred_e_ids=None, top_e=4, top_a=fallback_top_a,
         )
     elif no_path or not paths:
         # flat v5-style fallback of the dual-pool assembly
@@ -1195,8 +879,8 @@ def Graph_Rag_pipeline(query, C_balls, B_balls, edges, Propositions,
         if bridge_texts:
             sections.append("Multi-hop bridge clues:\n" + "\n".join(f"- {t}" for t in bridge_texts))
         all_facts = []
-        for cid in seed_c:
-            for t in c_to_facts.get(cid, []):
+        for eid in seed_e:
+            for t in e_to_facts.get(eid, []):
                 if t not in all_facts:
                     all_facts.append(t)
         for t, _, _, _ in final_pool:
@@ -1209,7 +893,7 @@ def Graph_Rag_pipeline(query, C_balls, B_balls, edges, Propositions,
         # pool (drop the path-ordered segments).
         sections = []
         supplement = []
-        for facts in c_to_facts.values():
+        for facts in e_to_facts.values():
             for t in facts:
                 if t not in supplement:
                     supplement.append(t)
@@ -1229,15 +913,15 @@ def Graph_Rag_pipeline(query, C_balls, B_balls, edges, Propositions,
         path_emitted = set()
         for path in paths:
             chain = []
-            for pos, cid in enumerate(path):
-                if cid not in used_c:
-                    facts = list(dict.fromkeys(c_to_facts.get(cid, [])))
+            for pos, eid in enumerate(path):
+                if eid not in used_c:
+                    facts = list(dict.fromkeys(e_to_facts.get(eid, [])))
                     if facts:
-                        chain.append(f"[Regional facts of {cid}]\n" + "\n".join(f"- {x}" for x in facts))
+                        chain.append(f"[Regional facts of {eid}]\n" + "\n".join(f"- {x}" for x in facts))
                         path_emitted.update(facts)
-                    used_c.add(cid)
+                    used_c.add(eid)
                 if pos + 1 < len(path):
-                    edge_text = edge_info.get((cid, path[pos + 1])) or edge_info.get((path[pos + 1], cid))
+                    edge_text = edge_info.get((eid, path[pos + 1])) or edge_info.get((path[pos + 1], eid))
                     if edge_text and edge_text not in used_e:
                         chain.append(f"==> [Edge Bridge Proposition] {edge_text}")
                         used_e.add(edge_text)
@@ -1249,9 +933,9 @@ def Graph_Rag_pipeline(query, C_balls, B_balls, edges, Propositions,
         # supplementary pool: seed-C facts not on any selected path + entity-C facts
         supplement = []
         # seed-C facts not covered by any selected path
-        for cid in seed_c:
-            if cid not in used_c:
-                for t in dict.fromkeys(c_to_facts.get(cid, [])):
+        for eid in seed_e:
+            if eid not in used_c:
+                for t in dict.fromkeys(e_to_facts.get(eid, [])):
                     if t not in supplement:
                         supplement.append(t)
         # entity-activated C facts and middle-C facts (both already ungated);
@@ -1277,18 +961,18 @@ def Graph_Rag_pipeline(query, C_balls, B_balls, edges, Propositions,
     lengths = [max(0, len(p) - 1) for p in paths]
     trace = {
         "retrieved_context": context, "experiment_id": "DCB_v18_dual_pool",
-        "p1_top_b": selected_b, "v15_top_chunk_ids": top_chunk_ids,
-        "v15_gated_b_count": len(centroids), "v15_entity_c_candidate_count": len(entity_c),
-        "v15_entity_b_bonus_count": len(entity_b), "v11_parent_c_seeds": seed_c,
+        "p1_top_d": selected_d, "v15_top_chunk_ids": top_chunk_ids,
+        "v15_gated_d_count": len(centroids), "v15_entity_e_candidate_count": len(entity_e),
+        "v15_entity_d_bonus_count": len(entity_d), "v11_parent_e_seeds": seed_e,
         "selected_paths": paths, "context_paths": paths,
-        "activated_node_type": "c_ball", "activated_node_count": len(path_c),
+        "activated_node_type": "e_ball", "activated_node_count": len(path_e),
         "path_activated": bool(paths), "path_count": len(paths),
         "avg_path_length": round(sum(lengths) / len(lengths), 6) if lengths else 0.0,
         "max_path_length": max(lengths, default=0),
         "activated_relation_count": sum(max(0, len(p) - 1) for p in paths),
-        "selected_fact_count": sum(len(x) for x in c_to_facts.values()),
+        "selected_fact_count": sum(len(x) for x in e_to_facts.values()),
         "v18_supplement_count": len(supplement) if (not fallback_used and not no_supp) else 0,
-        "v18_bridge_count": len(bridge_texts), "v18_c_summary_count": len(c_lines),
+        "v18_bridge_count": len(bridge_texts), "v18_e_summary_count": len(c_lines),
         "v18_middle_added": len(middle_added), "v18_entity_added": len(entity_added),
         "v18_fallback_used": fallback_used,
         "v18_ablation": {"no_chunk_gate": no_chunk_gate, "no_entity_c": no_entity_c,
@@ -1296,10 +980,9 @@ def Graph_Rag_pipeline(query, C_balls, B_balls, edges, Propositions,
                           "no_fallback": no_fallback, "no_supp": no_supp,
                           "supp_only": supp_only,
                           "no_bridge": no_bridge, "no_c_summary": no_c_summary},
-        "is_d_summary_answer": False,
         "retrieval_seconds": round(end - started, 6),
         "answer_generation_seconds": round(end - answer_started, 6),
         "path_search_seconds": round(time.perf_counter() - path_started, 6),
         "v11_path_edge_candidates": len(edge_info),
     }
-    return (answer, False, trace) if return_trace else answer
+    return (answer, trace) if return_trace else answer

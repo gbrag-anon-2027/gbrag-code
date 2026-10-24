@@ -8,9 +8,7 @@ import numpy as np
 from prompt import entity_prompt, time_prompt, tag_prompt
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import chromadb
 import nltk
-from langchain_core.prompts import PromptTemplate
 from tqdm import tqdm
 
 from json_tool import append_json_item, start_json_list_file, finish_json_list_file
@@ -94,8 +92,6 @@ def llm_abstract_concurrent(
     Output format is identical to the legacy llm_abstract: propositions_data.json
     fields: idx, id, proposition, entity_list, extend_key_list, time_entity_list
     """
-    from json_tool import start_json_list_file, append_json_item, finish_json_list_file
-
     with open(pure_props_filename, "r", encoding="utf-8") as f:
         propositions = json.load(f)
 

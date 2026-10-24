@@ -3,38 +3,7 @@ import os
 from langchain_core.prompts import PromptTemplate
 
 # ============================================================
-# Chain 1: Sufficiency check (with time-query detection)
-# ============================================================
-sufficiency_check_prompt_str = """
-You are a routing agent for a QA system.
-
-User Query: {query}
-
-Retrieved D-Level Summaries:
-{d_balls_context}
-
-Determine if the summaries contain ALL key facts needed to answer the query.
-
-- If YES (answer is directly present or clearly deducible):
-  Return: {{"is_sufficient": true, "target_d_idx": "D_x"}}
-
-- If NO (specific facts, names, numbers, dates, relationships are missing):
-  Also determine if the query asks about a date, time, year, or when something happened. Set "is_time_query" to true or false accordingly.
-  Return: {{"is_sufficient": false, "is_time_query": true/false, "missing_entities": ["concrete entity name(s) the answer must contain"], "target_d_idx": "D_x"}}
-
-CRITICAL: missing_entities must be concrete named entities (e.g., "August 2006", "emergency-essential program", "Fort Bliss"), NOT generic terms like "program", "date", "policy".
-
-Return ONLY the JSON object.
-"""
-
-sufficiency_check_prompt = PromptTemplate(
-    input_variables=["query", "d_balls_context"],
-    template=sufficiency_check_prompt_str
-)
-
-
-# ============================================================
-# Chain 2: Entity extraction (only called when is_sufficient=false)
+# Entity extraction prompt template
 # ============================================================
 entity_extract_prompt_str = """
 You are a search entity extractor.
@@ -67,18 +36,6 @@ entity_extract_prompt = PromptTemplate(
     template=entity_extract_prompt_str
 )
 
-entity_retry_prompt = PromptTemplate(
-    input_variables=["query"],
-    template=(
-        "The first entity extraction returned no usable graph anchors. Re-examine the query without guessing the answer.\n"
-        "User Query: {query}\n\n"
-        "Extract concrete named entities and specific qualified concepts that are explicitly present in the query and can match a knowledge-graph entity. "
-        "Do not return generic answer placeholders such as 'specific date', 'specific location', or 'program name'.\n"
-        "Also return query_domain, query_focus (the requested relation/attribute), and answer_type.\n"
-        "Return JSON only: {{\"query_entities\": [...], \"query_domain\": [...], "
-        "\"query_focus\": \"...\", \"answer_type\": \"...\"}}"
-    )
-)
 
 def _build_answer_prompt():
     # Opt-in answer-format experiment. The default keeps the v5 prompt unchanged.
@@ -113,7 +70,7 @@ def _build_answer_prompt():
             "If the context truly does not contain the needed fact, return unknown.\n\n"
             "=== CONTEXT FORMAT NOTE ===\n"
             "The context may contain two section types, both are valid factual information:\n"
-            "1. [C_x extracted facts]: Facts extracted from a cluster.\n"
+            "1. [E_x extracted facts]: Facts extracted from a cluster.\n"
             "2. [Multi-hop Bridge Clue]: ALSO real propositions that bridge clusters. "
             "They contain valid factual statements and MUST be treated as equally important context, "
             "NOT as path descriptions or metadata.\n"
@@ -121,7 +78,7 @@ def _build_answer_prompt():
             "IMPORTANT: The [Multi-hop Bridge Clue] sections contain relation propositions that directly "
             "answer the query's relationship. Pay special attention to dates, times, and entities mentioned "
             "in these bridge sections — they are more likely to directly address the question's core relationship. "
-            "The [C_x extracted facts] sections provide supporting context, but the bridge edges carry the key relational information.\n\n"
+            "The [E_x extracted facts] sections provide supporting context, but the bridge edges carry the key relational information.\n\n"
             "=== TIME QUESTIONS (when/which date/which year) ===\n"
             "Multiple dates may appear in the context. Identify the specific action or event in the question, and match it to the corresponding date in the context. Do not confuse related but different dates (e.g., announcement vs. effective date).\n\n"
             "=== COMPARISON QUESTIONS (which had more/fewer, which is larger/smaller, compared with) ===\n"
@@ -138,50 +95,6 @@ def _build_answer_prompt():
         )
     )
 
-def _build_d_summary_answer_prompt():
-    return PromptTemplate(
-        input_variables=["query", "context"],
-        template=(
-            "Answer the user query using ONLY the D-level summary context below.\n"
-            "Return ONLY the final short answer text itself.\n"
-            "The answer should be as short as possible, preferably a single entity name, date, number, or short noun phrase.\n"
-            "Do NOT output labels such as 'Answer:', 'The answer is:', or 'Short Answer:'.\n"
-            "Do NOT output JSON, markdown, explanations, bullet points, or full sentences.\n"
-            "CRITICAL: Use the EXACT wording from the context whenever possible. "
-            "If the context says 'Air Force locations', answer 'Air Force locations', NOT 'Air Force sites'.\n"
-            "If the answer is not explicitly supported by the context, return unknown. "
-            "Do NOT guess or infer based on partial information.\n\n"
-            "=== COMPARISON QUESTIONS (which had more/fewer, which is larger/smaller, compared with) ===\n"
-            "You MUST think step by step:\n"
-            "Step 1: Identify ALL numeric values in the context and which entity each belongs to.\n"
-            "Step 2: Pay attention to the question's logic.\n"
-            "  - 'fewer X lacking documentation' = 'X has less deficiency' = 'X is better/more compliant'\n"
-            "Step 3: Compare the numbers strictly and choose the correct entity.\n"
-            "Step 4: Output ONLY the final answer entity name.\n\n"
-            "User Query: {query}\n\n"
-            "D-Level Context:\n{context}\n\n"
-            "Final Answer:"
-        )
-    )
-
-def _build_d_summary_verified_answer_prompt():
-    """D-summary fast path: require an answer plus an exact supporting fact."""
-    return PromptTemplate(
-        input_variables=["query", "context"],
-        template=(
-            "Answer the user query using ONLY the target D-level context below.\n"
-            "Return JSON only with exactly these fields:\n"
-            "{{\"answer\": \"short answer or unknown\", "
-            "\"supporting_fact\": \"one exact sentence copied from the context or empty\", "
-            "\"confidence\": 0.0}}\n"
-            "The supporting_fact must be copied verbatim from the context and must directly support the answer.\n"
-            "If the context does not explicitly support one unambiguous answer, return answer=unknown, "
-            "supporting_fact=\"\", and confidence below 0.65.\n"
-            "Do not guess. Keep the answer as a short entity, date, number, or noun phrase.\n\n"
-            "User Query: {query}\n\n"
-            "Target D-Level Context:\n{context}\n"
-        )
-    )
 
 def _build_nli_judge_prompt():
     return PromptTemplate(

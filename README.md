@@ -2,9 +2,9 @@
 
 Official implementation of **GBRAG**, a hierarchical GraphRAG framework that
 organizes a corpus into a granular-ball hierarchy graph — A-level factual
-propositions, B-level domain balls, C-level entity balls, and D-level topic
-balls, connected by cross-ball boundary edges — and retrieves through the
-hierarchy with a dual-pool evidence context assembly.
+propositions, E-level entity balls, and D-level domain balls, connected by
+cross-ball boundary edges — and retrieves through the hierarchy with a
+dual-pool evidence context assembly.
 
 The framework is evaluated on multi-hop and long-document QA benchmarks and
 is compared against flat text-RAG baselines (BM25 / dense top-k) under the
@@ -19,19 +19,18 @@ raw corpus chunks
 [T5 propositionizer]  ----->  A-level propositions (atomic facts + entities/tags/time)
       |
       v
-[offline graph builder]  --->  C balls (entity clusters)
-                         --->  B balls (domain splits inside C balls)
-                         --->  edges (boundary-bridge propositions between C balls)
-                         --->  D balls (topic clusters; graph-building by-product)
-                         --->  vector index (ChromaDB, D/C/A levels)
+[offline graph builder]  --->  E balls (entity clusters)
+                         --->  D balls (domain splits inside E balls)
+                         --->  edges (boundary-bridge propositions between E balls)
+                         --->  vector index (ChromaDB, E/D/A levels)
       |
       v
 [online retrieval pipeline]  (Graph_Rag_pipeline)
-  chunk gate -> entity extraction -> B-ball recall (+entity bonus)
-  -> in-ball A-proposition scoring -> seed C balls -> edge-activated
+  chunk gate -> entity extraction -> D-ball recall (+entity bonus)
+  -> in-ball A-proposition scoring -> seed E balls -> edge-activated
   bounded shortest-path search -> dual-pool context assembly
   (ordered path segments + supplementary evidence pool + bridge propositions
-   + C-level summaries + global fallback)
+   + E-level summaries + global fallback)
       |
       v
   LLM answer generation  ->  EM / F1 / NLI / ER / EP / CQT / latency metrics

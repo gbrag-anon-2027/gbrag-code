@@ -11,9 +11,6 @@ import torch
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 from graph_retriever import Graph_Rag_pipeline
 from tqdm import tqdm
-from edge_config import is_edge_enabled
-
-from json_tool import load_qa_benchmark
 from file_path import PROPOSITIONIZER_DIR
 from prompt import _build_nli_judge_prompt
 from standard_metrics import (
@@ -378,15 +375,13 @@ def summarize_benchmark_results(results: List[Dict[str, Any]], dataset_name: str
         "cqt": average("cqt"),
         "exact_match_count": sum(1 for item in results if item["em"] == 1.0),
         "nli_entailment_count": sum(1 for item in results if item["nli_label"] == "entailment"),
-        "d_summary_answer_ratio": round(sum(1 for item in results if item.get("is_d_summary_answer")) / total,
-                                        4) if total > 0 else 0.0,
     }
 
 def run_qa_benchmark_with_metrics(
     qa_items,
     qa_benchmark_path,
-    C_balls,
-    B_balls,
+    E_balls,
+    D_balls,
     edges,
     Propositions,
     llm,
@@ -450,55 +445,23 @@ def run_qa_benchmark_with_metrics(
             print(f"gold_answers: {gold_answers}")
 
             sample_started = time.perf_counter()
-            # Select the retrieval pipeline based on edge_propagation.
-            if edge_propagation:
-                from graph_retriever import Graph_Rag_pipeline
-                pipeline_result = Graph_Rag_pipeline(
-                    question,
-                    C_balls,
-                    B_balls,
-                    edges,
-                    Propositions,
-                    llm,
-                    embedding_model,
-                    db_helper,
-                    enable_edge_propagation=True,
-                    enable_fallback=False,
-                    return_trace=True,
-                    experiment_config=experiment_config,
-                )
-                if isinstance(pipeline_result, tuple) and len(pipeline_result) == 3:
-                    prediction, is_d_summary, retrieval_trace = pipeline_result
-                elif isinstance(pipeline_result, tuple):
-                    prediction, is_d_summary = pipeline_result
-                    retrieval_trace = {}
-                else:
-                    prediction, is_d_summary = pipeline_result, False
-                    retrieval_trace = {}
+            pipeline_result = Graph_Rag_pipeline(
+                question,
+                E_balls,
+                D_balls,
+                edges,
+                Propositions,
+                llm,
+                embedding_model,
+                db_helper,
+                enable_edge_propagation=edge_propagation,
+                return_trace=True,
+                experiment_config=experiment_config,
+            )
+            if isinstance(pipeline_result, tuple):
+                prediction, retrieval_trace = pipeline_result
             else:
-                # Layer ablations share one configuration-driven online retriever.
-                # Graph caches remain untouched; use_edges controls only QA retrieval.
-                from graph_retriever import Graph_Rag_pipeline
-                pipeline_result = Graph_Rag_pipeline(
-                    question,
-                    C_balls,
-                    B_balls,
-                    edges,
-                    Propositions,
-                    llm,
-                    embedding_model,
-                    db_helper,
-                    enable_edge_propagation=False,
-                    return_trace=True,
-                    experiment_config=experiment_config,
-                )
-                if isinstance(pipeline_result, tuple) and len(pipeline_result) == 3:
-                    prediction, is_d_summary, retrieval_trace = pipeline_result
-                elif isinstance(pipeline_result, tuple):
-                    prediction, is_d_summary = pipeline_result
-                    retrieval_trace = {}
-                else:
-                    prediction, is_d_summary, retrieval_trace = pipeline_result, False, {}
+                prediction, retrieval_trace = pipeline_result, {}
             retrieval_seconds = float(retrieval_trace.get("retrieval_seconds", 0.0))
             answer_generation_seconds = float(retrieval_trace.get("answer_generation_seconds", 0.0))
             latency_seconds = round(retrieval_seconds + answer_generation_seconds, 4)
@@ -537,7 +500,6 @@ def run_qa_benchmark_with_metrics(
                 "em_f1_matched_gold_answer": metric_result["em_f1_matched_gold_answer"],
                 "nli_matched_gold_answer": metric_result["nli_matched_gold_answer"],
                 "nli_raw_response": metric_result["nli_raw_response"],
-                "is_d_summary_answer": is_d_summary,
                 "retrieval_trace": retrieval_trace,
                 **retrieval_metric,
             }
@@ -569,16 +531,9 @@ def run_qa_benchmark_with_metrics(
                 "sample_wall_seconds": round(time.perf_counter() - sample_started, 6),
                 "context_token_count": retrieval_metric.get("context_token_count", 0),
             }
-            for stage_key in (
-                "query_embedding_seconds", "d_retrieval_seconds",
-                "router_llm_seconds", "entity_extraction_seconds",
-                "c_activation_seconds", "edge_scoring_seconds",
-                "path_search_seconds", "b_scoring_seconds",
-                "a_selection_seconds", "context_assembly_seconds",
-            ):
-                timing_record[stage_key] = round(
-                    float(retrieval_trace.get(stage_key, 0.0)), 6
-                )
+            timing_record["path_search_seconds"] = round(
+                float(retrieval_trace.get("path_search_seconds", 0.0)), 6
+            )
             timing_metrics_file.write(json.dumps(timing_record, ensure_ascii=False) + "\n")
             timing_metrics_file.flush()
             os.fsync(timing_metrics_file.fileno())

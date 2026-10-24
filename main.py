@@ -44,13 +44,13 @@ def main():
             )
         with open(props_path, encoding="utf-8") as f: propositions = json.load(f)
         graph_dir = fp._get_graph_chroma_db_path_with_edges(dataset_name)
-        C, B, D, edges, db = build_full_graph(propositions, embedding, llm, graph_dir)
+        E, D, edges, db = build_full_graph(propositions, embedding, llm, graph_dir)
         if stage == "build": continue
         qa_path = fp._get_qa_path(dataset_name)
         os.environ["GBRAG_RAW_CORPUS_PATH"] = fp._get_chunk_path(dataset_name)
         qa_items = load_qa_benchmark(qa_path)
         run_qa_benchmark_with_metrics(qa_items=qa_items, qa_benchmark_path=qa_path,
-            C_balls=C, B_balls=B, edges=edges, Propositions=propositions,
+            E_balls=E, D_balls=D, edges=edges, Propositions=propositions,
             llm=llm, embedding_model=embedding, db_helper=db, edge_propagation=True,
             experiment_config=config, max_new_samples=batch_size)
 

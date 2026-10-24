@@ -1,7 +1,7 @@
 """
 Edge-construction configuration module.
 
-Controls whether edges between C-level balls (boundary bridges) are built in the
+Controls whether edges between E-level balls (boundary bridges) are built in the
 granular-ball hierarchy graph.
 """
 from enum import Enum

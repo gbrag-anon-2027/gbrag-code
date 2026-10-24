@@ -1,7 +1,6 @@
 import gc
 import os, re
 import torch
-from dataset_map import DATASET_MAP
 import json
 from file_path import File_path
 import ast

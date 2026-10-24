@@ -202,7 +202,6 @@ def run_dataset(dataset_name, mode, top_k, max_chars, tag, output_root, batch_si
             "relaxed_f1": eval_result["relaxed_f1"],
             "nli_label": eval_result["nli_label"],
             "nli_score": eval_result["nli_score"],
-            "is_d_summary_answer": False,
             "evidence_recall": ctx_result["evidence_recall"],
             "all_evidence_hit": ctx_result["all_evidence_hit"],
             "evidence_precision": ctx_result["evidence_precision"],

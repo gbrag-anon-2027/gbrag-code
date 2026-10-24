@@ -7,7 +7,7 @@ Variants (selected by the GBRAG_VARIANT environment variable):
   edge_similarity P1b: edges replaced by "pure similarity edges"
                     (nearest cross-ball centroid pairs, relation text = most
                     similar proposition pair)
-  kmeans          P2: B/C balls replaced by K-means clustering
+  kmeans          P2: E/D balls replaced by K-means clustering
                     (edges use entity-overlap rule, same as P1a)
 
 Data loading reuses the same caches as main (only the in-memory edges/balls
@@ -17,7 +17,7 @@ evaluator pipeline, and outputs match the v18 structure for direct comparison.
 Environment variables (same as main, except GBRAG_VARIANT):
   GBRAG_DATASETS / GBRAG_BATCH_SIZE / GBRAG_OUTPUT_ROOT (a per-variant suffix
   is appended automatically)
-  GBRAG_KM_B_PER_C  number of B balls per K-means C ball (default 4)
+  GBRAG_KM_B_PER_C  number of D balls per K-means E ball (default 4)
 """
 import os
 
@@ -43,41 +43,41 @@ from edge_config import EdgeMode, set_edge_mode
 import graph_retriever as v5
 
 
-def _entity_set(c_ball):
+def _entity_set(e_ball):
     out = set()
-    for x in c_ball.get("entity_list", []) or []:
+    for x in e_ball.get("entity_list", []) or []:
         n = v5._normalize_entity_name(str(x))
         if n:
             out.add(n)
     return out
 
 
-def build_entity_edges(C_balls, max_edges):
-    """Entity-overlap edges: connect C-ball pairs sharing entities; the
+def build_entity_edges(E_balls, max_edges):
+    """Entity-overlap edges: connect E-ball pairs sharing entities; the
     relation text is the shared entity names (no proposition evidence)."""
     pairs = []
-    for a, b in itertools.combinations(C_balls, 2):
+    for a, b in itertools.combinations(E_balls, 2):
         shared = _entity_set(a) & _entity_set(b)
         if shared:
             pairs.append((len(shared), a["idx"], b["idx"], sorted(shared)))
     pairs.sort(key=lambda x: (-x[0], str(x[1]), str(x[2])))
     edges = []
     for _, i, j, shared in pairs[:max_edges]:
-        edges.append({"node_C_1": i, "node_C_2": j,
+        edges.append({"node_E_1": i, "node_E_2": j,
                       "relation": ", ".join(shared),
                       "shared_entities": list(shared)})
     return edges
 
 
-def build_similarity_edges(C_balls, Propositions, embedding_model, db_helper, max_edges):
+def build_similarity_edges(E_balls, Propositions, embedding_model, db_helper, max_edges):
     """Similarity edges: take top pairs by summary-vector similarity instead of
     the boundary-proposition screening (semantic deviation + shared entities).
 
     The linking criterion is purely semantic similarity; the relation text is the
-    concatenation of both C-ball summaries.
+    concatenation of both E-ball summaries.
     """
     centroids, summaries = {}, {}
-    for c in C_balls:
+    for c in E_balls:
         summary = str(c.get("summary", "")).strip()
         text = summary if summary else str(c.get("idx", ""))
         summaries[c["idx"]] = text
@@ -90,22 +90,22 @@ def build_similarity_edges(C_balls, Propositions, embedding_model, db_helper, ma
     for a_i, b_i in itertools.combinations(range(len(ids)), 2):
         cand.append((float(sim[a_i, b_i]), ids[a_i], ids[b_i]))
     cand.sort(key=lambda x: x[0], reverse=True)
-    by_id = {c["idx"]: c for c in C_balls}
+    by_id = {c["idx"]: c for c in E_balls}
     edges = []
     for s, i, j in cand[:max_edges]:
         shared = sorted(_entity_set(by_id[i]) & _entity_set(by_id[j]))
-        edges.append({"node_C_1": i, "node_C_2": j,
+        edges.append({"node_E_1": i, "node_E_2": j,
                       "relation": f"{summaries[i]} <=> {summaries[j]}",
                       "shared_entities": shared})
     return edges
 
 
 def _pack_balls(labels, prefix, Xn, Propositions, b_per_c, sub_method, sub_kw=None):
-    """Pack clustering labels into C/B ball structures (shared by P2 variants).
+    """Pack clustering labels into C/D ball structures (shared by P2 variants).
 
-    labels: a C-level cluster label per proposition (label -1 is noise and is
+    labels: a E-level cluster label per proposition (label -1 is noise and is
     assigned to the nearest centroid cluster);
-    sub_method: how B balls are split inside each C ball
+    sub_method: how D balls are split inside each E ball
     ("kmeans"/"agglomerative"/"hdbscan").
     """
     from sklearn.cluster import KMeans, AgglomerativeClustering
@@ -122,7 +122,7 @@ def _pack_balls(labels, prefix, Xn, Propositions, b_per_c, sub_method, sub_kw=No
         noise = np.where(labels < 0)[0]
         labels = labels.copy()
         labels[noise] = (centers @ Xn[noise].T).argmax(axis=0)
-    C_balls, B_balls = [], []
+    E_balls, D_balls = [], []
     for label in range(n_c):
         member_idx = np.where(labels == label)[0]
         if len(member_idx) == 0:
@@ -157,15 +157,15 @@ def _pack_balls(labels, prefix, Xn, Propositions, b_per_c, sub_method, sub_kw=No
                 mapping = {p: i % max(k_b, 1) for i, p in enumerate(pos)}
                 sub = np.array([mapping.get(s, i % max(k_b, 1)) if s >= 0 else i % max(k_b, 1)
                                 for i, s in enumerate(sub)])
-        b_indices = []
+        d_indices = []
         for bl in range(max(sub) + 1):
-            b_idx = f"{prefix}_B{label}_{bl}"
-            b_indices.append(b_idx)
-            B_balls.append({"idx": b_idx,
+            d_idx = f"{prefix}_B{label}_{bl}"
+            d_indices.append(d_idx)
+            D_balls.append({"idx": d_idx,
                             "all_indices": [f"A_{int(member_idx[i])}" for i in np.where(sub == bl)[0]]})
-        C_balls.append({"idx": c_idx, "b_indices": b_indices,
+        E_balls.append({"idx": c_idx, "d_indices": d_indices,
                         "entity_list": entities, "summary": ""})
-    return C_balls, B_balls
+    return E_balls, D_balls
 
 
 def _embed_matrix(Propositions, embedding_model, db_helper):
@@ -175,7 +175,7 @@ def _embed_matrix(Propositions, embedding_model, db_helper):
 
 
 def build_kmeans_balls(Propositions, embedding_model, db_helper, n_c, b_per_c=4):
-    """P2a: K-means version of the B/C balls (partitional clustering)."""
+    """P2a: K-means version of the E/D balls (partitional clustering)."""
     from sklearn.cluster import KMeans
     Xn = _embed_matrix(Propositions, embedding_model, db_helper)
     labels = KMeans(n_clusters=n_c, n_init=4, random_state=0).fit_predict(Xn)
@@ -183,7 +183,7 @@ def build_kmeans_balls(Propositions, embedding_model, db_helper, n_c, b_per_c=4)
 
 
 def build_agglomerative_balls(Propositions, embedding_model, db_helper, n_c, b_per_c=4):
-    """P2b: hierarchical-clustering version of the B/C balls (Ward linkage with
+    """P2b: hierarchical-clustering version of the E/D balls (Ward linkage with
     a kNN connectivity graph to avoid O(n^2))."""
     from sklearn.cluster import AgglomerativeClustering
     from sklearn.neighbors import kneighbors_graph
@@ -196,7 +196,7 @@ def build_agglomerative_balls(Propositions, embedding_model, db_helper, n_c, b_p
 
 
 def build_hdbscan_balls(Propositions, embedding_model, db_helper, n_c, b_per_c=4):
-    """P2c: density-based version of the B/C balls (HDBSCAN; the cluster count is
+    """P2c: density-based version of the E/D balls (HDBSCAN; the cluster count is
     decided by the data, n_c is only a reference)."""
     import hdbscan
     Xn = _embed_matrix(Propositions, embedding_model, db_helper)
@@ -229,25 +229,25 @@ def main():
         with open(props_path, encoding="utf-8") as f:
             propositions = json.load(f)
         graph_dir = fp._get_graph_chroma_db_path_with_edges(dataset_name)
-        C, B, D, edges, db = build_full_graph(propositions, embedding, llm, graph_dir)
+        E, D, edges, db = build_full_graph(propositions, embedding, llm, graph_dir)
 
         if variant == "edge_entity":
-            run_edges = build_entity_edges(C, max_edges=len(edges))
-            run_C, run_B = C, B
+            run_edges = build_entity_edges(E, max_edges=len(edges))
+            run_E, run_D = E, D
         elif variant == "edge_similarity":
-            run_edges = build_similarity_edges(C, propositions, embedding, db, max_edges=len(edges))
-            run_C, run_B = C, B
+            run_edges = build_similarity_edges(E, propositions, embedding, db, max_edges=len(edges))
+            run_E, run_D = E, D
         else:
             if variant == "kmeans":
-                run_C, run_B = build_kmeans_balls(propositions, embedding, db, n_c=len(C), b_per_c=b_per_c)
+                run_E, run_D = build_kmeans_balls(propositions, embedding, db, n_c=len(E), b_per_c=b_per_c)
             elif variant == "agglomerative":
-                run_C, run_B = build_agglomerative_balls(propositions, embedding, db, n_c=len(C), b_per_c=b_per_c)
+                run_E, run_D = build_agglomerative_balls(propositions, embedding, db, n_c=len(E), b_per_c=b_per_c)
             else:  # hdbscan
-                run_C, run_B = build_hdbscan_balls(propositions, embedding, db, n_c=len(C), b_per_c=b_per_c)
-            run_edges = build_entity_edges(run_C, max_edges=len(edges))
+                run_E, run_D = build_hdbscan_balls(propositions, embedding, db, n_c=len(E), b_per_c=b_per_c)
+            run_edges = build_entity_edges(run_E, max_edges=len(edges))
 
         print(f"[{variant}] {dataset_name}: edges {len(edges)} -> variant edges {len(run_edges)}; "
-              f"C {len(C)}->{len(run_C)}, B {len(B)}->{len(run_B)}")
+              f"E {len(E)}->{len(run_E)}, D {len(D)}->{len(run_D)}")
 
         os.environ["GBRAG_RAW_CORPUS_PATH"] = fp._get_chunk_path(dataset_name)
         qa_path = fp._get_qa_path(dataset_name)
@@ -255,7 +255,7 @@ def main():
         os.environ["GBRAG_OUTPUT_ROOT"] = os.path.join(output_root, f"{variant}_b{batch_size}")
         run_qa_benchmark_with_metrics(
             qa_items=qa_items, qa_benchmark_path=qa_path,
-            C_balls=run_C, B_balls=run_B, edges=run_edges,
+            E_balls=run_E, D_balls=run_D, edges=run_edges,
             Propositions=propositions, llm=llm, embedding_model=embedding,
             db_helper=db, edge_propagation=True, experiment_config=config,
             max_new_samples=batch_size)
