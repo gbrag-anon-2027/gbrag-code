@@ -266,14 +266,3 @@ annotated, complete list is in [`.env.example`](.env.example). Key groups:
 ## License
 
 This project is released under the [MIT License](LICENSE).
-
-## Citation
-
-```bibtex
-@inproceedings{gbrag2027,
-  title     = {GBRAG: Granular-Ball Hierarchical Retrieval-Augmented Generation},
-  author    = {Anonymous},
-  booktitle = {Proceedings of The Web Conference (WWW)},
-  year      = {2027}
-}
-```
