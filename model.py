@@ -49,7 +49,8 @@ class BallModel():
         if backend == "transformers":
             return self._get_llm_model_transformers()
         return ChatOllama(
-            model="qwen2.5:14b",
+            # Model served by the Ollama endpoint; override with GBRAG_LLM_MODEL.
+            model=os.environ.get("GBRAG_LLM_MODEL", "qwen2.5:14b"),
             temperature=0.0,
             base_url=os.environ.get("GBRAG_LLM_BASE_URL", "http://localhost:8080"),
             timeout=float(os.environ.get("GBRAG_LLM_TIMEOUT", "300")),

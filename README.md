@@ -111,9 +111,10 @@ export GBRAG_LLM_BASE_URL=http://localhost:8080  # default already 8080
 ```
 
 Any OpenAI-compatible endpoint works as well: run `ollama serve` (or vLLM,
-TGI, LMDeploy, ...) and set `GBRAG_LLM_BASE_URL` to its URL. The model name is
-fixed in `model.py` (`qwen2.5:14b`); change it there or serve your model under
-the same name (`ollama cp your-model qwen2.5:14b`).
+TGI, LMDeploy, ...) and set `GBRAG_LLM_BASE_URL` to its URL. The default model
+name is `qwen2.5:14b`; point `GBRAG_LLM_MODEL` at any tag served by your
+endpoint (or serve your model under the same name,
+`ollama cp your-model qwen2.5:14b`).
 
 **Option B — local Transformers weights.**
 
@@ -133,7 +134,7 @@ explicitly opt-in (`GBRAG_ALLOW_CPU=1`).
 
 The processed benchmark files used in our experiments are **included** in this
 repository under `dataset/` (1,000 QA items and the corresponding passage
-corpus per dataset; ~14 MB in total). The raw sources are the public
+corpus per dataset; ~20 MB in total). The raw sources are the public
 benchmarks: HotpotQA (hotpotqa.github.io), 2WikiMultihopQA
 (github.com/Alab-NII/2wikimultihopqa), PubMedQA
 (github.com/pubmedqa/pubmedqa), and GovReport
@@ -249,7 +250,7 @@ All behavior is controlled through `GBRAG_*` environment variables; the
 annotated, complete list is in [`.env.example`](.env.example). Key groups:
 
 - **Data / batching**: `GBRAG_DATASETS`, `GBRAG_BATCH_SIZE`, `GBRAG_OUTPUT_ROOT`, `GBRAG_STAGE`
-- **LLM**: `GBRAG_LLM_BACKEND`, `GBRAG_LLM_BASE_URL`, `GBRAG_LLM_MODEL_PATH`, `GBRAG_LLM_DTYPE`, `GBRAG_LLM_DEVICE_MAP`, `GBRAG_LLM_MAX_MEM`, `GBRAG_LLM_WORKERS`
+- **LLM**: `GBRAG_LLM_BACKEND`, `GBRAG_LLM_BASE_URL`, `GBRAG_LLM_MODEL`, `GBRAG_LLM_MODEL_PATH`, `GBRAG_LLM_DTYPE`, `GBRAG_LLM_DEVICE_MAP`, `GBRAG_LLM_MAX_MEM`, `GBRAG_LLM_WORKERS`
 - **Devices**: `GBRAG_CUDA_DEVICES`, `GBRAG_EMBEDDING_DEVICE`, `CONTEXT_METRIC_DEVICE`
 - **Retrieval hyper-parameters**: `GBRAG_V17_TOP_B`, `GBRAG_V11_SCORE_KEEP`, `GBRAG_V11_FINAL_KEEP`, `GBRAG_V17_MAX_C_SEEDS`, `GBRAG_V11_MAX_PATH_HOPS`, `GBRAG_V11_MAX_PATH_COST`, `GBRAG_V17_MIN_EDGE_SIM`, ...
 - **Single-module ablations**: `GBRAG_V18_NO_CHUNK_GATE`, `GBRAG_V18_NO_ENTITY_C`, `GBRAG_V18_NO_DOMAIN_BONUS`, `GBRAG_V18_NO_PATH`, `GBRAG_V18_NO_FALLBACK`, `GBRAG_V18_NO_SUPP`, `GBRAG_V18_SUPP_ONLY`, `GBRAG_V18_NO_BRIDGE`, `GBRAG_V18_NO_C_SUMMARY`, `GBRAG_V18_FLAT`
